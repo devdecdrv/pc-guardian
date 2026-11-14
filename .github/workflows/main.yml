@@ -4,14 +4,7 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version (e.g. v1.0.0)"
-        required: true
-        default: "v1.0.0"
 
 jobs:
   build:
@@ -36,7 +29,6 @@ jobs:
       - name: Show repo structure (debug)
         shell: pwsh
         run: |
-          Write-Host "=== Working directory ==="
           Get-Location
           Get-ChildItem -Force | Select-Object Name
           if (Test-Path "main.py") { Write-Host "main.py FOUND" } else { Write-Host "main.py MISSING"; exit 1 }
@@ -66,20 +58,10 @@ jobs:
             screeninfo==0.8.1
           pip install pyinstaller
 
-      - name: Determine version
-        id: get_version
+      - name: Get short commit SHA
+        id: sha
         shell: bash
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-            echo "IS_RELEASE=true" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-            echo "IS_RELEASE=true" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-            echo "IS_RELEASE=false" >> $GITHUB_OUTPUT
-          fi
+        run: echo "SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Build exe with PyInstaller
         shell: pwsh
@@ -117,45 +99,39 @@ jobs:
           if (-not (Test-Path "dist/PCGuardian.exe")) {
             Write-Host "BUILD FAILED — exe not found"; exit 1
           }
-          $version = "${{ steps.get_version.outputs.VERSION }}"
-          $newName = "PCGuardian-$version-windows-x64.exe"
-          Rename-Item "dist\PCGuardian.exe" $newName
-          $size = [math]::Round((Get-Item "dist\$newName").Length / 1MB, 1)
-          Write-Host "Build SUCCESS — $newName ($size MB)"
+          $sha = "${{ steps.sha.outputs.SHORT }}"
+          Rename-Item "dist\PCGuardian.exe" "PCGuardian-$sha-windows-x64.exe"
+          Write-Host "Built: PCGuardian-$sha-windows-x64.exe"
 
-      - name: Create GitHub Release
-        if: steps.get_version.outputs.IS_RELEASE == 'true'
+      - name: Delete existing latest release
+        shell: bash
+        run: |
+          gh release delete latest --yes || true
+          git push origin :refs/tags/latest || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create latest release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.get_version.outputs.VERSION }}
-          name: "PC Guardian ${{ steps.get_version.outputs.VERSION }}"
+          tag_name: latest
+          name: "PC Guardian — Latest Build"
           body: |
-            ## PC Guardian ${{ steps.get_version.outputs.VERSION }}
+            ## PC Guardian — Latest Build
+            Built from commit `${{ steps.sha.outputs.SHORT }}`
 
-            ### First time setup
-            1. Download `PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe`
+            ### Install
+            1. Download `PCGuardian-${{ steps.sha.outputs.SHORT }}-windows-x64.exe`
             2. Run it — config and startup register automatically on first launch
             3. Bot connects instantly, no setup needed
 
-            ### Features
-            - Full-screen lock engine with input blocking
-            - Telegram bot — complete remote control from your phone
-            - Camera / microphone / speaker access
-            - Activity & behavior monitoring
-            - Auto-schedule — school hours, bedtime, homework mode
-            - Tamper detection & password-protected uninstall guard
-            - Local web dashboard at `http://localhost:8080`
-            - Auto-starts at Windows boot
-          files: pc-guardian/dist/PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe
+            ### Telegram bot
+            Open `@decdrivebot` and send `/status` to confirm it's running.
+
+            ### Commands
+            `/lock` `/unlock` `/cam` `/screen` `/speak` `/apps` `/status` `/help`
+          files: pc-guardian/dist/PCGuardian-${{ steps.sha.outputs.SHORT }}-windows-x64.exe
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload build artifact (non-release pushes)
-        if: steps.get_version.outputs.IS_RELEASE == 'false'
-        uses: actions/upload-artifact@v4
-        with:
-          name: PCGuardian-${{ steps.get_version.outputs.VERSION }}
-          path: pc-guardian/dist/PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe
-          retention-days: 7
