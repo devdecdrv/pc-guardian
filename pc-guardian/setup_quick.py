@@ -1,11 +1,11 @@
 """
-PC Guardian — Quick Setup (pre-filled experimental credentials)
-Run: python setup_quick.py
+PC Guardian — Quick Setup
+Run this once before main.py to create the encrypted config.
+Usage: python setup_quick.py
 """
 
 import os
 import sys
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.crypto import encrypt_config
@@ -16,7 +16,7 @@ config_data = {
     "uninstall_password": "decdrv",
     "lock_keyword": "lockson",
     "child_name": "Son",
-    "lock_message": "Take a breath, Son. Dad is watching.",
+    "lock_message": "Take a breath. Dad is watching.",
     "daily_report_time": "21:00",
     "school_schedule": {
         "enabled": False,
@@ -44,4 +44,4 @@ config_data = {
 }
 
 encrypt_config(config_data)
-print("Config saved and encrypted. Run main.py to start.")
+print("Config created successfully. Now run: python main.py")
