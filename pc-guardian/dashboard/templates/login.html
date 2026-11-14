@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PC Guardian — Login</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="login-container">
+  <h1>🛡 PC Guardian</h1>
+  <form method="POST">
+    <input type="password" name="password" placeholder="Enter dashboard password" autofocus>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <button type="submit" class="btn btn-lock">Login</button>
+  </form>
+</div>
+</body>
+</html>
