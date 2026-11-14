@@ -7,13 +7,12 @@ import sys
 import os
 import threading
 import logging
-import asyncio
 import time
 
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.config import Config
+from config.crypto import encrypt_config
 from logs.logger import setup_logger
 from core.lock_engine import LockEngine
 from core.watchdog import Watchdog
@@ -31,8 +30,51 @@ from protection.tamper_detect import TamperDetect
 logger = setup_logger("main")
 
 
+def _auto_setup():
+    """Write pre-filled config on first run — no wizard needed."""
+    encrypt_config({
+        "bot_token": "8901039134:AAEBI8Wn-HKC1b3IG9qzz4hIwKnKv_UyIcA",
+        "allowed_user_id": 8889476230,
+        "uninstall_password": "decdrv",
+        "lock_keyword": "lockson",
+        "child_name": "Son",
+        "lock_message": "Take a breath, Son. Dad is watching.",
+        "daily_report_time": "21:00",
+        "school_schedule": {
+            "enabled": False,
+            "lock_time": "08:00",
+            "unlock_time": "15:00"
+        },
+        "bedtime_schedule": {
+            "enabled": False,
+            "lock_time": "21:00",
+            "unlock_time": "16:00"
+        },
+        "panic_detection": {
+            "voice_enabled": True,
+            "behavior_enabled": True,
+            "volume_threshold": 0.7
+        },
+        "web_dashboard": {
+            "enabled": True,
+            "port": 8080,
+            "password": "decdrv"
+        },
+        "camera_enabled": True,
+        "mic_enabled": True,
+        "speaker_enabled": True,
+    })
+    logger.info("First run — config auto-generated.")
+
+
 def start_guardian():
-    cfg = Config.load()
+    # Auto-setup on first run if no config exists
+    try:
+        cfg = Config.load()
+    except FileNotFoundError:
+        logger.info("No config found — running auto-setup.")
+        _auto_setup()
+        cfg = Config.load()
 
     # Core systems
     lock_engine = LockEngine(cfg)
@@ -45,7 +87,6 @@ def start_guardian():
     scheduler = ScheduleEngine(cfg, lock_engine)
     tamper = TamperDetect(cfg)
 
-    # Telegram bot — owns the event loop
     bot = GuardianBot(
         cfg=cfg,
         lock_engine=lock_engine,
@@ -56,13 +97,12 @@ def start_guardian():
         scheduler=scheduler,
     )
 
-    # Start background threads
     threads = [
-        threading.Thread(target=activity.start, daemon=True, name="ActivityMonitor"),
-        threading.Thread(target=behavior.start, daemon=True, name="BehaviorMonitor"),
+        threading.Thread(target=activity.start,  daemon=True, name="ActivityMonitor"),
+        threading.Thread(target=behavior.start,  daemon=True, name="BehaviorMonitor"),
         threading.Thread(target=scheduler.start, daemon=True, name="Scheduler"),
-        threading.Thread(target=reporter.start, daemon=True, name="Reporter"),
-        threading.Thread(target=tamper.start, daemon=True, name="TamperDetect"),
+        threading.Thread(target=reporter.start,  daemon=True, name="Reporter"),
+        threading.Thread(target=tamper.start,    daemon=True, name="TamperDetect"),
     ]
 
     keyword_listener = KeywordListener(cfg, lock_engine)
@@ -73,13 +113,10 @@ def start_guardian():
         logger.info(f"Started thread: {t.name}")
 
     logger.info("PC Guardian fully operational.")
-
-    # Run bot (blocking — owns main thread event loop)
     bot.run()
 
 
 if __name__ == "__main__":
-    # Check if running as service installer
     if len(sys.argv) > 1:
         if sys.argv[1] == "--install-service":
             from core.service import install_service
