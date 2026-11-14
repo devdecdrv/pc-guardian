@@ -4,10 +4,17 @@ Loads and manages encrypted configuration
 """
 
 import os
+import sys
 import json
 from config.crypto import decrypt_config, encrypt_config
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.enc")
+
+def _get_config_path() -> str:
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "config", "config.enc")
 
 
 class Config:
@@ -16,7 +23,8 @@ class Config:
 
     @classmethod
     def load(cls):
-        if not os.path.exists(CONFIG_PATH):
+        config_path = _get_config_path()
+        if not os.path.exists(config_path):
             raise FileNotFoundError(
                 "Config not found. Run: python main.py --setup"
             )
