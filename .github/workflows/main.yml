@@ -1,0 +1,103 @@
+name: Build & Release PC Guardian
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Determine version tag
+        id: get_version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build exe with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --noconsole `
+            --name "PCGuardian" `
+            --icon "assets/icon.ico" `
+            --add-data "assets;assets" `
+            --add-data "dashboard/templates;dashboard/templates" `
+            --add-data "dashboard/static;dashboard/static" `
+            --hidden-import "pynput.keyboard._win32" `
+            --hidden-import "pynput.mouse._win32" `
+            --hidden-import "win32api" `
+            --hidden-import "win32con" `
+            --hidden-import "win32gui" `
+            --hidden-import "win32service" `
+            --hidden-import "win32serviceutil" `
+            --hidden-import "flask" `
+            --hidden-import "telebot" `
+            --hidden-import "cv2" `
+            --hidden-import "pyttsx3.drivers" `
+            --hidden-import "pyttsx3.drivers.sapi5" `
+            main.py
+        shell: pwsh
+
+      - name: Rename output
+        shell: pwsh
+        run: |
+          $version = "${{ steps.get_version.outputs.VERSION }}"
+          Rename-Item "dist\PCGuardian.exe" "PCGuardian-$version-windows-x64.exe"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          name: "PC Guardian ${{ steps.get_version.outputs.VERSION }}"
+          body: |
+            ## PC Guardian ${{ steps.get_version.outputs.VERSION }}
+
+            ### Installation
+            1. Download `PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe`
+            2. Run it — first launch starts the setup wizard
+            3. Enter your Telegram bot token, user ID, and password when prompted
+            4. Optionally install as a Windows service: run with `--install-service`
+
+            ### What's inside
+            - Full-screen lock engine with input blocking
+            - Telegram bot — remote control from your phone
+            - Camera / microphone / speaker access
+            - Activity & behavior monitoring
+            - Auto-schedule (school mode, weekend mode)
+            - Tamper detection & uninstall guard
+            - Local web dashboard at `localhost:8080`
+
+            > **First run:** no config file needed — setup wizard handles everything.
+          files: |
+            dist/PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
