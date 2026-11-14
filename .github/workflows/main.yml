@@ -14,6 +14,10 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
+    permissions:
+      contents: write
+
     defaults:
       run:
         working-directory: pc-guardian
@@ -32,15 +36,32 @@ jobs:
         run: |
           Write-Host "=== Working directory ==="
           Get-Location
-          Write-Host "=== Files ==="
           Get-ChildItem -Force | Select-Object Name
-          if (Test-Path "main.py") { Write-Host "main.py FOUND" } else { Write-Host "main.py MISSING" }
+          if (Test-Path "main.py") { Write-Host "main.py FOUND" } else { Write-Host "main.py MISSING"; exit 1 }
 
       - name: Install dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip setuptools wheel
+          pip install `
+            python-telegram-bot==20.7 `
+            pynput==1.7.6 `
+            pywin32==306 `
+            opencv-python==4.9.0.80 `
+            sounddevice==0.4.6 `
+            scipy==1.12.0 `
+            numpy==1.26.4 `
+            pyttsx3==2.90 `
+            pydub==0.25.1 `
+            pygame==2.5.2 `
+            pycaw==20230407 `
+            Pillow==10.2.0 `
+            pyautogui==0.9.54 `
+            psutil==5.9.8 `
+            flask==3.0.2 `
+            cryptography==42.0.5 `
+            APScheduler==3.10.4 `
+            screeninfo==0.8.1
           pip install pyinstaller
 
       - name: Determine version tag
@@ -72,44 +93,30 @@ jobs:
             "--hidden-import", "cv2",
             "--hidden-import", "pyttsx3.drivers",
             "--hidden-import", "pyttsx3.drivers.sapi5",
+            "--hidden-import", "pygame",
             "--collect-all", "pyttsx3",
             "--collect-all", "cv2"
           )
 
-          if (Test-Path "assets") {
-            $args += "--add-data"; $args += "assets;assets"
-          }
-          if (Test-Path "dashboard/templates") {
-            $args += "--add-data"; $args += "dashboard/templates;dashboard/templates"
-          }
-          if (Test-Path "dashboard/static") {
-            $args += "--add-data"; $args += "dashboard/static;dashboard/static"
-          }
-          if (Test-Path "assets/icon.ico") {
-            $args += "--icon"; $args += "assets/icon.ico"
-          }
+          if (Test-Path "assets")                { $args += "--add-data"; $args += "assets;assets" }
+          if (Test-Path "dashboard/templates")   { $args += "--add-data"; $args += "dashboard/templates;dashboard/templates" }
+          if (Test-Path "dashboard/static")      { $args += "--add-data"; $args += "dashboard/static;dashboard/static" }
+          if (Test-Path "assets/icon.ico")       { $args += "--icon"; $args += "assets/icon.ico" }
 
           $args += "main.py"
-
-          Write-Host "Running: pyinstaller $args"
           & pyinstaller @args
 
-      - name: Verify build output
+      - name: Verify and rename exe
         shell: pwsh
         run: |
-          if (Test-Path "dist/PCGuardian.exe") {
-            $size = (Get-Item "dist/PCGuardian.exe").Length / 1MB
-            Write-Host "Build SUCCESS — PCGuardian.exe ($([math]::Round($size,1)) MB)"
-          } else {
-            Write-Host "BUILD FAILED — exe not found in dist/"
-            exit 1
+          if (-not (Test-Path "dist/PCGuardian.exe")) {
+            Write-Host "BUILD FAILED — exe not found"; exit 1
           }
-
-      - name: Rename exe with version
-        shell: pwsh
-        run: |
           $version = "${{ steps.get_version.outputs.VERSION }}"
-          Rename-Item "dist\PCGuardian.exe" "PCGuardian-$version-windows-x64.exe"
+          $newName = "PCGuardian-$version-windows-x64.exe"
+          Rename-Item "dist\PCGuardian.exe" $newName
+          $size = [math]::Round((Get-Item "dist\$newName").Length / 1MB, 1)
+          Write-Host "Build SUCCESS — $newName ($size MB)"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -121,15 +128,15 @@ jobs:
 
             ### First time setup
             1. Download `PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe`
-            2. Run it — setup wizard starts automatically on first launch
-            3. Enter your Telegram bot token, your user ID, and a password
-            4. Optional: run with `--install-service` as Administrator to start at boot
+            2. Run it — setup wizard launches on first run
+            3. Enter your Telegram bot token, user ID, and password
+            4. Optional: run as Administrator with `--install-service` to start at boot
 
             ### Features
-            - Full-screen lock engine with input blocking
+            - Full-screen lock engine with input blocking (all monitors)
             - Telegram bot — complete remote control from your phone
             - Camera / microphone / speaker access
-            - Activity & behavior monitoring
+            - Activity & behavior monitoring — rage-click, long session alerts
             - Auto-schedule — school hours, bedtime, homework mode
             - Tamper detection & password-protected uninstall guard
             - Local web dashboard at `http://localhost:8080`
