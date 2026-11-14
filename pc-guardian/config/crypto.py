@@ -4,22 +4,45 @@ Fernet symmetric encryption for config storage
 """
 
 import os
+import sys
 import json
 import base64
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.enc")
-KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".key")
 SALT = b"pcguardian_salt_v1_secure"
 
 
+def _get_config_dir() -> str:
+    """
+    Returns a stable, writable config directory whether running
+    from source or as a PyInstaller onefile bundle.
+    """
+    if getattr(sys, "frozen", False):
+        # Exe — write beside the exe in a config/ subfolder
+        base = os.path.dirname(sys.executable)
+    else:
+        # Source — write in config/ alongside this file
+        base = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, "config")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _get_paths():
+    d = _get_config_dir()
+    return (
+        os.path.join(d, "config.enc"),
+        os.path.join(d, ".key"),
+    )
+
+
 def _get_or_create_key():
-    if os.path.exists(KEY_PATH):
-        with open(KEY_PATH, "rb") as f:
+    _, key_path = _get_paths()
+    if os.path.exists(key_path):
+        with open(key_path, "rb") as f:
             return f.read()
-    # Generate machine-specific key
     machine_id = _get_machine_id()
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -28,12 +51,11 @@ def _get_or_create_key():
         iterations=480000,
     )
     key = base64.urlsafe_b64encode(kdf.derive(machine_id.encode()))
-    with open(KEY_PATH, "wb") as f:
+    with open(key_path, "wb") as f:
         f.write(key)
-    # Hide the key file
     try:
         import ctypes
-        ctypes.windll.kernel32.SetFileAttributesW(KEY_PATH, 2)  # FILE_ATTRIBUTE_HIDDEN
+        ctypes.windll.kernel32.SetFileAttributesW(key_path, 2)
     except Exception:
         pass
     return key
@@ -51,18 +73,18 @@ def _get_machine_id():
 
 
 def encrypt_config(data: dict):
+    config_path, _ = _get_paths()
     key = _get_or_create_key()
     f = Fernet(key)
-    plaintext = json.dumps(data).encode()
-    encrypted = f.encrypt(plaintext)
-    with open(CONFIG_PATH, "wb") as fp:
+    encrypted = f.encrypt(json.dumps(data).encode())
+    with open(config_path, "wb") as fp:
         fp.write(encrypted)
 
 
 def decrypt_config() -> dict:
+    config_path, _ = _get_paths()
     key = _get_or_create_key()
     f = Fernet(key)
-    with open(CONFIG_PATH, "rb") as fp:
+    with open(config_path, "rb") as fp:
         encrypted = fp.read()
-    plaintext = f.decrypt(encrypted)
-    return json.loads(plaintext.decode())
+    return json.loads(f.decrypt(encrypted).decode())
