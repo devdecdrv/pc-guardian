@@ -24,7 +24,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Show repo structure (debug)
+        shell: pwsh
+        run: |
+          Write-Host "=== Repo root ==="
+          Get-ChildItem -Force | Select-Object Name
+          Write-Host "=== Verifying main.py ==="
+          if (Test-Path "main.py") { Write-Host "main.py FOUND" } else { Write-Host "main.py MISSING — build will fail" }
+
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -41,35 +50,73 @@ jobs:
           fi
 
       - name: Build exe with PyInstaller
-        run: |
-          pyinstaller `
-            --onefile `
-            --noconsole `
-            --name "PCGuardian" `
-            --icon "assets/icon.ico" `
-            --add-data "assets;assets" `
-            --add-data "dashboard/templates;dashboard/templates" `
-            --add-data "dashboard/static;dashboard/static" `
-            --hidden-import "pynput.keyboard._win32" `
-            --hidden-import "pynput.mouse._win32" `
-            --hidden-import "win32api" `
-            --hidden-import "win32con" `
-            --hidden-import "win32gui" `
-            --hidden-import "win32service" `
-            --hidden-import "win32serviceutil" `
-            --hidden-import "flask" `
-            --hidden-import "telebot" `
-            --hidden-import "cv2" `
-            --hidden-import "pyttsx3.drivers" `
-            --hidden-import "pyttsx3.drivers.sapi5" `
-            main.py
         shell: pwsh
+        run: |
+          $args = @(
+            "--onefile",
+            "--noconsole",
+            "--name", "PCGuardian",
+            "--hidden-import", "pynput.keyboard._win32",
+            "--hidden-import", "pynput.mouse._win32",
+            "--hidden-import", "win32api",
+            "--hidden-import", "win32con",
+            "--hidden-import", "win32gui",
+            "--hidden-import", "win32service",
+            "--hidden-import", "win32serviceutil",
+            "--hidden-import", "flask",
+            "--hidden-import", "telebot",
+            "--hidden-import", "cv2",
+            "--hidden-import", "pyttsx3.drivers",
+            "--hidden-import", "pyttsx3.drivers.sapi5",
+            "--hidden-import", "pkg_resources.py2_compat",
+            "--collect-all", "pyttsx3",
+            "--collect-all", "cv2"
+          )
 
-      - name: Rename output
+          # Add assets dir if it exists
+          if (Test-Path "assets") {
+            $args += "--add-data"
+            $args += "assets;assets"
+          }
+
+          # Add dashboard templates if they exist
+          if (Test-Path "dashboard/templates") {
+            $args += "--add-data"
+            $args += "dashboard/templates;dashboard/templates"
+          }
+          if (Test-Path "dashboard/static") {
+            $args += "--add-data"
+            $args += "dashboard/static;dashboard/static"
+          }
+
+          # Add icon only if it exists
+          if (Test-Path "assets/icon.ico") {
+            $args += "--icon"
+            $args += "assets/icon.ico"
+          }
+
+          $args += "main.py"
+
+          Write-Host "Running: pyinstaller $args"
+          & pyinstaller @args
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (Test-Path "dist/PCGuardian.exe") {
+            $size = (Get-Item "dist/PCGuardian.exe").Length / 1MB
+            Write-Host "Build SUCCESS — PCGuardian.exe ($([math]::Round($size,1)) MB)"
+          } else {
+            Write-Host "BUILD FAILED — exe not found in dist/"
+            exit 1
+          }
+
+      - name: Rename exe with version
         shell: pwsh
         run: |
           $version = "${{ steps.get_version.outputs.VERSION }}"
           Rename-Item "dist\PCGuardian.exe" "PCGuardian-$version-windows-x64.exe"
+          Write-Host "Renamed to: PCGuardian-$version-windows-x64.exe"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -79,22 +126,26 @@ jobs:
           body: |
             ## PC Guardian ${{ steps.get_version.outputs.VERSION }}
 
-            ### Installation
+            ### First time setup
             1. Download `PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe`
-            2. Run it — first launch starts the setup wizard
-            3. Enter your Telegram bot token, user ID, and password when prompted
-            4. Optionally install as a Windows service: run with `--install-service`
+            2. Run it — setup wizard starts automatically on first launch
+            3. Enter your Telegram bot token, your user ID, and a password
+            4. Optional — install as Windows service (runs at boot, survives logout):
+               run the exe once from cmd as Administrator with `--install-service`
 
             ### What's inside
-            - Full-screen lock engine with input blocking
-            - Telegram bot — remote control from your phone
-            - Camera / microphone / speaker access
-            - Activity & behavior monitoring
-            - Auto-schedule (school mode, weekend mode)
-            - Tamper detection & uninstall guard
-            - Local web dashboard at `localhost:8080`
+            - Full-screen lock engine with input blocking (all monitors)
+            - Telegram bot — complete remote control from your phone
+            - Camera (snapshot / burst / stream), microphone (record / live), speaker (TTS / voice playback)
+            - Activity & behavior monitoring — rage-click detection, long session alerts
+            - Auto-schedule — school hours, bedtime, homework mode
+            - Tamper detection & password-protected uninstall guard
+            - Local web dashboard at `http://localhost:8080`
 
-            > **First run:** no config file needed — setup wizard handles everything.
+            ### Telegram commands
+            `/lock` `/unlock` `/cam` `/listen` `/speak` `/screen` `/apps` `/schedule` `/help`
+
+            > Password default: set during setup wizard. Keep it safe.
           files: |
             dist/PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe
           draft: false
