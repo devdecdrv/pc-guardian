@@ -421,3 +421,88 @@ class Commands:
             "/settings — View all\n"
         )
         await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+# ─── FILE MANAGER (appended) ──────────────────────────────────────────────────
+
+    async def cmd_ls(self, update, context):
+        if not self._authorized(update): return
+        path = " ".join(context.args) if context.args else "C:\\Users"
+        from core.file_manager import FileManager
+        fm = FileManager(self.cfg)
+        listing, err = fm.list_dir(path)
+        if err:
+            await update.message.reply_text(f"❌ {err}")
+        else:
+            await update.message.reply_text(f"📁 `{path}`\n{listing}", parse_mode="Markdown")
+
+    async def cmd_readfile(self, update, context):
+        if not self._authorized(update): return
+        path = " ".join(context.args)
+        if not path:
+            await update.message.reply_text("Usage: /readfile [path]")
+            return
+        from core.file_manager import FileManager
+        fm = FileManager(self.cfg)
+        data, err = fm.read_file(path)
+        if err:
+            await update.message.reply_text(f"❌ {err}")
+            return
+        # Send as document
+        import io
+        filename = os.path.basename(path)
+        await update.message.reply_document(
+            document=io.BytesIO(data),
+            filename=filename,
+            caption=f"📄 {path}"
+        )
+
+    async def cmd_writefile(self, update, context):
+        """Write an uploaded file to a PC path: /writefile C:\\path\\file.txt"""
+        if not self._authorized(update): return
+        path = " ".join(context.args)
+        if not path:
+            await update.message.reply_text("Send a file and reply to it with /writefile [destination_path]")
+            return
+        # Check if replying to a document
+        if update.message.reply_to_message and update.message.reply_to_message.document:
+            doc = update.message.reply_to_message.document
+            file = await context.bot.get_file(doc.file_id)
+            import tempfile as tf
+            tmp = tf.mktemp()
+            await file.download_to_drive(tmp)
+            with open(tmp, "rb") as f:
+                content = f.read()
+            from core.file_manager import FileManager
+            fm = FileManager(self.cfg)
+            ok, msg = fm.write_file(path, content)
+            await update.message.reply_text(f"{'✅' if ok else '❌'} {msg}")
+        else:
+            await update.message.reply_text("Reply to a file with this command.")
+
+    async def cmd_deletefile(self, update, context):
+        if not self._authorized(update): return
+        path = " ".join(context.args)
+        if not path:
+            await update.message.reply_text("Usage: /deletefile [path]")
+            return
+        from core.file_manager import FileManager
+        fm = FileManager(self.cfg)
+        ok, msg = fm.delete_file(path)
+        await update.message.reply_text(f"{'✅' if ok else '❌'} {msg}")
+
+    async def cmd_findfile(self, update, context):
+        if not self._authorized(update): return
+        if not context.args:
+            await update.message.reply_text("Usage: /findfile [pattern] e.g. /findfile *.txt")
+            return
+        pattern = context.args[0]
+        root = context.args[1] if len(context.args) > 1 else "C:\\Users"
+        from core.file_manager import FileManager
+        fm = FileManager(self.cfg)
+        results = fm.search_files(pattern, root)
+        if not results:
+            await update.message.reply_text(f"No files matching `{pattern}` found.", parse_mode="Markdown")
+        else:
+            lines = "\n".join(f"• {r}" for r in results)
+            await update.message.reply_text(f"🔍 *Found:*\n{lines}", parse_mode="Markdown")
