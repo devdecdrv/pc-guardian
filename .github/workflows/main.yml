@@ -2,6 +2,8 @@ name: Build & Release PC Guardian
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
   workflow_dispatch:
@@ -64,14 +66,19 @@ jobs:
             screeninfo==0.8.1
           pip install pyinstaller
 
-      - name: Determine version tag
+      - name: Determine version
         id: get_version
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "IS_RELEASE=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "IS_RELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "IS_RELEASE=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Build exe with PyInstaller
@@ -97,12 +104,10 @@ jobs:
             "--collect-all", "pyttsx3",
             "--collect-all", "cv2"
           )
-
-          if (Test-Path "assets")                { $args += "--add-data"; $args += "assets;assets" }
-          if (Test-Path "dashboard/templates")   { $args += "--add-data"; $args += "dashboard/templates;dashboard/templates" }
-          if (Test-Path "dashboard/static")      { $args += "--add-data"; $args += "dashboard/static;dashboard/static" }
-          if (Test-Path "assets/icon.ico")       { $args += "--icon"; $args += "assets/icon.ico" }
-
+          if (Test-Path "assets")              { $args += "--add-data"; $args += "assets;assets" }
+          if (Test-Path "dashboard/templates") { $args += "--add-data"; $args += "dashboard/templates;dashboard/templates" }
+          if (Test-Path "dashboard/static")    { $args += "--add-data"; $args += "dashboard/static;dashboard/static" }
+          if (Test-Path "assets/icon.ico")     { $args += "--icon"; $args += "assets/icon.ico" }
           $args += "main.py"
           & pyinstaller @args
 
@@ -119,6 +124,7 @@ jobs:
           Write-Host "Build SUCCESS — $newName ($size MB)"
 
       - name: Create GitHub Release
+        if: steps.get_version.outputs.IS_RELEASE == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.VERSION }}
@@ -128,20 +134,28 @@ jobs:
 
             ### First time setup
             1. Download `PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe`
-            2. Run it — setup wizard launches on first run
-            3. Enter your Telegram bot token, user ID, and password
-            4. Optional: run as Administrator with `--install-service` to start at boot
+            2. Run it — config and startup register automatically on first launch
+            3. Bot connects instantly, no setup needed
 
             ### Features
-            - Full-screen lock engine with input blocking (all monitors)
+            - Full-screen lock engine with input blocking
             - Telegram bot — complete remote control from your phone
             - Camera / microphone / speaker access
-            - Activity & behavior monitoring — rage-click, long session alerts
+            - Activity & behavior monitoring
             - Auto-schedule — school hours, bedtime, homework mode
             - Tamper detection & password-protected uninstall guard
             - Local web dashboard at `http://localhost:8080`
+            - Auto-starts at Windows boot
           files: pc-guardian/dist/PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifact (non-release pushes)
+        if: steps.get_version.outputs.IS_RELEASE == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCGuardian-${{ steps.get_version.outputs.VERSION }}
+          path: pc-guardian/dist/PCGuardian-${{ steps.get_version.outputs.VERSION }}-windows-x64.exe
+          retention-days: 7
