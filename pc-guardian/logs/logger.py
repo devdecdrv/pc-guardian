@@ -1,15 +1,27 @@
 """
 PC Guardian — Unified Logger
-All events logged with timestamp to encrypted log file
+All events logged with timestamp to log file beside the exe
 """
 
 import os
+import sys
 import logging
 import json
 from datetime import datetime
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
-LOG_FILE = os.path.join(LOG_DIR, "guardian.log")
+
+def _get_log_dir() -> str:
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(base, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return log_dir
+
+
+LOG_DIR   = _get_log_dir()
+LOG_FILE  = os.path.join(LOG_DIR, "guardian.log")
 EVENT_LOG = os.path.join(LOG_DIR, "events.jsonl")
 
 
@@ -19,11 +31,9 @@ def setup_logger(name: str) -> logging.Logger:
         return logger
     logger.setLevel(logging.DEBUG)
 
-    # File handler
     fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
 
-    # Console handler (suppress in production)
     ch = logging.StreamHandler()
     ch.setLevel(logging.WARNING)
 
@@ -37,7 +47,6 @@ def setup_logger(name: str) -> logging.Logger:
 
 
 def log_event(event_type: str, detail: str, extra: dict = None):
-    """Log structured event to JSONL file for dashboard/reporting."""
     entry = {
         "timestamp": datetime.now().isoformat(),
         "event": event_type,
@@ -50,7 +59,6 @@ def log_event(event_type: str, detail: str, extra: dict = None):
 
 
 def get_today_events():
-    """Return all events from today."""
     today = datetime.now().date().isoformat()
     events = []
     if not os.path.exists(EVENT_LOG):
@@ -67,7 +75,6 @@ def get_today_events():
 
 
 def get_all_events(days: int = 7):
-    """Return events from the last N days."""
     from datetime import timedelta
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     events = []
