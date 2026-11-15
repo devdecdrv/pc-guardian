@@ -18,21 +18,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Move into project folder
-        run: cd pc-guardian
-        shell: cmd
-
       - name: Install dependencies
         run: pip install -r pc-guardian/requirements.txt pyinstaller
+        shell: cmd
+
+      - name: Create missing folders
+        run: |
+          if not exist pc-guardian\assets mkdir pc-guardian\assets
+          if not exist pc-guardian\logs mkdir pc-guardian\logs
+          if not exist pc-guardian\config mkdir pc-guardian\config
+          echo placeholder > pc-guardian\assets\.gitkeep
         shell: cmd
 
       - name: Build EXE
         run: |
           pyinstaller --onefile --noconsole ^
             --name "pc-guardian" ^
-            --add-data "pc-guardian/assets;assets" ^
-            --add-data "pc-guardian/dashboard/templates;dashboard/templates" ^
-            --add-data "pc-guardian/dashboard/static;dashboard/static" ^
             --hidden-import pynput.keyboard._win32 ^
             --hidden-import pynput.mouse._win32 ^
             --hidden-import win32api ^
@@ -40,6 +41,9 @@ jobs:
             --hidden-import win32gui ^
             --hidden-import win32com ^
             --hidden-import winerror ^
+            --hidden-import comtypes ^
+            --hidden-import flask ^
+            --hidden-import cryptography ^
             --paths pc-guardian ^
             pc-guardian/main.py
         shell: cmd
