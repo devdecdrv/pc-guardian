@@ -18,21 +18,21 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Show repo structure
-        run: dir /s /b *.py
+      - name: Move into project folder
+        run: cd pc-guardian
         shell: cmd
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r pc-guardian/requirements.txt pyinstaller
         shell: cmd
 
       - name: Build EXE
         run: |
           pyinstaller --onefile --noconsole ^
             --name "pc-guardian" ^
-            --add-data "assets;assets" ^
-            --add-data "dashboard/templates;dashboard/templates" ^
-            --add-data "dashboard/static;dashboard/static" ^
+            --add-data "pc-guardian/assets;assets" ^
+            --add-data "pc-guardian/dashboard/templates;dashboard/templates" ^
+            --add-data "pc-guardian/dashboard/static;dashboard/static" ^
             --hidden-import pynput.keyboard._win32 ^
             --hidden-import pynput.mouse._win32 ^
             --hidden-import win32api ^
@@ -40,7 +40,8 @@ jobs:
             --hidden-import win32gui ^
             --hidden-import win32com ^
             --hidden-import winerror ^
-            main.py
+            --paths pc-guardian ^
+            pc-guardian/main.py
         shell: cmd
 
       - name: Get version
@@ -59,7 +60,6 @@ jobs:
           name: ${{ steps.version.outputs.name }}
           body: |
             Auto-built from commit ${{ github.sha }}
-
             **Changes:** ${{ github.event.head_commit.message }}
 
             **Setup:**
