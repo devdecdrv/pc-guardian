@@ -1,8 +1,6 @@
 """
-PC Guardian — Camera System (FIXED)
-- Live stream now works via async loop injection
-- Snapshot reliable with proper warm-up
-- Fallback to DirectShow if default index fails
+PC Guardian — Camera (FIXED)
+Live stream using polling loop + direct async scheduling
 """
 
 import cv2
@@ -11,102 +9,94 @@ import time
 import threading
 import logging
 import tempfile
-import asyncio
 
 logger = logging.getLogger("camera")
 
-SNAPSHOT_DIR = os.path.join(tempfile.gettempdir(), "pcguardian_cam")
-os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+SNAP_DIR = os.path.join(tempfile.gettempdir(), "pcguardian_cam")
+os.makedirs(SNAP_DIR, exist_ok=True)
 
 
 class CameraSystem:
     def __init__(self, cfg):
         self.cfg = cfg
-        self._streaming  = False
-        self._stream_cb  = None
-        self._stream_loop = None  # asyncio loop from bot thread
+        self._streaming = False
+        self._bot_app   = None  # telegram Application reference
 
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
-        """Bot passes its loop so we can schedule sends from camera thread."""
-        self._stream_loop = loop
+    def set_bot_app(self, app):
+        """Bot passes itself so camera can send photos directly."""
+        self._bot_app = app
 
-    def _open_camera(self):
-        """Try camera index 0, 1, 2 with DirectShow backend."""
+    def _open(self):
         for idx in range(3):
             for backend in [cv2.CAP_DSHOW, cv2.CAP_ANY]:
                 cap = cv2.VideoCapture(idx, backend)
                 if cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                    # Warm up — discard first 5 frames
-                    for _ in range(5):
-                        cap.read()
+                    for _ in range(3): cap.read()  # warm up
                     ret, frame = cap.read()
                     if ret and frame is not None:
-                        logger.info(f"Camera opened: index={idx} backend={backend}")
                         return cap
                 cap.release()
-        logger.error("No camera found on any index.")
         return None
 
     def capture_snapshot(self) -> str:
-        cap = self._open_camera()
-        if not cap:
-            return None
+        cap = self._open()
+        if not cap: return None
         ret, frame = cap.read()
         cap.release()
-        if not ret or frame is None:
-            return None
-        path = os.path.join(SNAPSHOT_DIR, f"snap_{int(time.time())}.jpg")
+        if not ret or frame is None: return None
+        path = os.path.join(SNAP_DIR, f"snap_{int(time.time())}.jpg")
         cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return path
 
-    def capture_burst(self, count: int = 5, interval: float = 2.0) -> list:
-        cap = self._open_camera()
-        if not cap:
-            return []
+    def capture_burst(self, count=5, interval=2.0) -> list:
+        cap = self._open()
+        if not cap: return []
         paths = []
         for i in range(count):
             ret, frame = cap.read()
             if ret and frame is not None:
-                path = os.path.join(SNAPSHOT_DIR, f"burst_{int(time.time())}_{i}.jpg")
-                cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                paths.append(path)
+                p = os.path.join(SNAP_DIR, f"burst_{int(time.time())}_{i}.jpg")
+                cv2.imwrite(p, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                paths.append(p)
             time.sleep(interval)
         cap.release()
         return paths
 
-    def start_stream(self, callback, interval: float = 3.0):
-        """
-        Stream frames to callback(path).
-        callback is an async coroutine function — scheduled onto bot's loop.
-        """
+    def start_stream(self, chat_id: int, interval: float = 3.0):
+        """Stream frames by sending directly via bot."""
         self._streaming = True
-        self._stream_cb = callback
 
         def _run():
-            cap = self._open_camera()
+            cap = self._open()
             if not cap:
-                logger.error("Stream: no camera.")
+                logger.error("Stream: no camera found.")
                 return
             while self._streaming:
                 ret, frame = cap.read()
                 if ret and frame is not None:
-                    path = os.path.join(SNAPSHOT_DIR, f"stream_{int(time.time())}.jpg")
-                    cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    if self._stream_cb:
-                        if self._stream_loop and self._stream_loop.is_running():
-                            asyncio.run_coroutine_threadsafe(
-                                self._stream_cb(path), self._stream_loop
+                    path = os.path.join(SNAP_DIR, f"stream_{int(time.time())}.jpg")
+                    cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if self._bot_app:
+                        try:
+                            import asyncio
+                            future = asyncio.run_coroutine_threadsafe(
+                                self._send_photo(chat_id, path),
+                                self._bot_app.bot._loop
                             )
-                        else:
-                            try: self._stream_cb(path)
-                            except Exception: pass
+                            future.result(timeout=10)
+                        except Exception as e:
+                            logger.error(f"Stream send failed: {e}")
                 time.sleep(interval)
             cap.release()
-            logger.info("Camera stream stopped.")
 
-        threading.Thread(target=_run, daemon=True, name="CameraStream").start()
+        threading.Thread(target=_run, daemon=True, name="CamStream").start()
+
+    async def _send_photo(self, chat_id: int, path: str):
+        try:
+            with open(path, "rb") as f:
+                await self._bot_app.bot.send_photo(chat_id=chat_id, photo=f)
+        except Exception as e:
+            logger.error(f"Photo send: {e}")
 
     def stop_stream(self):
         self._streaming = False
