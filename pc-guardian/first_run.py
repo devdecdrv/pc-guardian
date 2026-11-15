@@ -279,12 +279,13 @@ def change_credentials():
 
 
 def protect_from_deletion():
-    """Block delete permission on exe and config folder."""
+    """Block delete permission on config folder only — never on the exe itself."""
     try:
-        exe        = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
         config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
-        subprocess.run(f'icacls "{exe}" /deny Everyone:(D)', shell=True, capture_output=True)
-        subprocess.run(f'icacls "{config_dir}" /deny Everyone:(D,DC)', shell=True, capture_output=True)
+        subprocess.run(
+            f'icacls "{config_dir}" /deny Everyone:(D,DC)',
+            shell=True, capture_output=True
+        )
     except Exception:
         pass
 
