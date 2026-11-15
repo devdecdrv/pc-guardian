@@ -3,7 +3,7 @@ name: Build PC Guardian EXE
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # manual trigger button on GitHub
+  workflow_dispatch:
 
 jobs:
   build:
@@ -18,33 +18,39 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Show repo structure
+        run: dir /s /b *.py
+        shell: cmd
+
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pyinstaller
+        run: pip install -r requirements.txt pyinstaller
+        shell: cmd
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --noconsole `
-            --name "pc-guardian" `
-            --add-data "assets;assets" `
-            --add-data "dashboard/templates;dashboard/templates" `
-            --add-data "dashboard/static;dashboard/static" `
-            --hidden-import pynput.keyboard._win32 `
-            --hidden-import pynput.mouse._win32 `
-            --hidden-import win32api `
-            --hidden-import win32con `
-            --hidden-import win32gui `
+          pyinstaller --onefile --noconsole ^
+            --name "pc-guardian" ^
+            --add-data "assets;assets" ^
+            --add-data "dashboard/templates;dashboard/templates" ^
+            --add-data "dashboard/static;dashboard/static" ^
+            --hidden-import pynput.keyboard._win32 ^
+            --hidden-import pynput.mouse._win32 ^
+            --hidden-import win32api ^
+            --hidden-import win32con ^
+            --hidden-import win32gui ^
+            --hidden-import win32com ^
+            --hidden-import winerror ^
             main.py
+        shell: cmd
 
-      - name: Get version tag
+      - name: Get version
         id: version
         run: |
-          $date = Get-Date -Format "yyyy.MM.dd-HHmm"
-          $sha  = "${{ github.sha }}".Substring(0,7)
-          echo "tag=v$date-$sha" >> $env:GITHUB_OUTPUT
-          echo "name=PC Guardian $date (build $sha)" >> $env:GITHUB_OUTPUT
-        shell: pwsh
+          for /f "tokens=*" %%i in ('powershell -Command "Get-Date -Format 'yyyy.MM.dd-HHmm'"') do set DATE=%%i
+          set SHA=%GITHUB_SHA:~0,7%
+          echo tag=v%DATE%-%SHA%>> %GITHUB_OUTPUT%
+          echo name=PC Guardian %DATE% build %SHA%>> %GITHUB_OUTPUT%
+        shell: cmd
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -53,14 +59,13 @@ jobs:
           name: ${{ steps.version.outputs.name }}
           body: |
             Auto-built from commit ${{ github.sha }}
-            
-            **Changes in this build:**
-            ${{ github.event.head_commit.message }}
-            
-            **How to use:**
+
+            **Changes:** ${{ github.event.head_commit.message }}
+
+            **Setup:**
             1. Download `pc-guardian.exe`
-            2. Run it once — config auto-creates
-            3. Open Telegram and test with `/status`
+            2. Run it — config auto-creates
+            3. Open Telegram → `/status`
           files: dist/pc-guardian.exe
           draft: false
           prerelease: false
