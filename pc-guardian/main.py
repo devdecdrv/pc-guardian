@@ -1,6 +1,6 @@
 """
 PC Guardian — Main Entry Point
-Auto-creates config if missing, then starts everything.
+Auto-creates config, starts all systems including MCP server.
 """
 
 import sys
@@ -9,7 +9,7 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ── AUTO SETUP IF CONFIG MISSING ─────────────────────────────────────────────
+# ── AUTO SETUP ────────────────────────────────────────────────────────────────
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "config.enc")
 
 if not os.path.exists(CONFIG_PATH):
@@ -30,14 +30,14 @@ if not os.path.exists(CONFIG_PATH):
         "camera_enabled": True,
         "mic_enabled": True,
         "speaker_enabled": True,
+        "anthropic_api_key": "",
     })
 
-# ── STARTUP ───────────────────────────────────────────────────────────────────
+# ── IMPORTS ───────────────────────────────────────────────────────────────────
 from config.config import Config
 from logs.logger import setup_logger
 from core.lock_engine import LockEngine
 from core.keyword_listener import KeywordListener
-from core.watchdog import Watchdog
 from monitor.activity import ActivityMonitor
 from monitor.behavior import BehaviorMonitor
 from monitor.reporter import Reporter
@@ -49,7 +49,6 @@ from bot.bot import GuardianBot
 from protection.tamper_detect import TamperDetect
 
 logger = setup_logger("main")
-
 FIRST_RUN_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".installed")
 
 
@@ -60,9 +59,8 @@ def ensure_startup():
             if install_all():
                 with open(FIRST_RUN_FLAG, "w") as f:
                     f.write("1")
-                logger.info("Startup entries installed.")
         except Exception as e:
-            logger.warning(f"Startup install failed: {e}")
+            logger.warning(f"Startup install: {e}")
 
 
 def start_guardian():
@@ -78,6 +76,15 @@ def start_guardian():
     reporter    = Reporter(cfg, activity)
     scheduler   = ScheduleEngine(cfg, lock_engine)
     tamper      = TamperDetect(cfg)
+
+    # Wire MCP server
+    try:
+        import mcp_server
+        mcp_server.init(cfg, lock_engine, camera, mic, speaker, activity)
+        mcp_server.start_mcp_thread()
+        logger.info("MCP server started.")
+    except Exception as e:
+        logger.warning(f"MCP server failed to start: {e}")
 
     bot = GuardianBot(
         cfg=cfg,
@@ -103,7 +110,7 @@ def start_guardian():
 
     for t in threads:
         t.start()
-        logger.info(f"Thread started: {t.name}")
+        logger.info(f"Thread: {t.name}")
 
     logger.info("PC Guardian fully operational.")
     bot.run()
@@ -121,5 +128,9 @@ if __name__ == "__main__":
             from core.startup import install_all
             install_all()
             print("Startup installed.")
+        elif sys.argv[1] == "--mcp-only":
+            # Run just the MCP server for testing
+            import mcp_server
+            mcp_server.run_mcp_server()
     else:
         start_guardian()
