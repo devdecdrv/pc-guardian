@@ -1,136 +1,67 @@
-name: Build & Release PC Guardian
+name: Build PC Guardian EXE
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:
+    branches: [ main ]
+  workflow_dispatch:  # manual trigger button on GitHub
 
 jobs:
   build:
     runs-on: windows-latest
 
-    permissions:
-      contents: write
-
-    defaults:
-      run:
-        working-directory: pc-guardian
-
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Show repo structure (debug)
-        shell: pwsh
-        run: |
-          Get-Location
-          Get-ChildItem -Force | Select-Object Name
-          if (Test-Path "main.py") { Write-Host "main.py FOUND" } else { Write-Host "main.py MISSING"; exit 1 }
-
       - name: Install dependencies
-        shell: pwsh
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install `
-            python-telegram-bot==20.7 `
-            pynput==1.7.6 `
-            pywin32==306 `
-            opencv-python==4.9.0.80 `
-            sounddevice==0.4.6 `
-            scipy==1.12.0 `
-            numpy==1.26.4 `
-            pyttsx3==2.90 `
-            pydub==0.25.1 `
-            pygame==2.5.2 `
-            pycaw==20230407 `
-            Pillow==10.2.0 `
-            pyautogui==0.9.54 `
-            psutil==5.9.8 `
-            flask==3.0.2 `
-            cryptography==42.0.5 `
-            APScheduler==3.10.4 `
-            screeninfo==0.8.1
+          pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Get short commit SHA
-        id: sha
-        shell: bash
-        run: echo "SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile --noconsole `
+            --name "pc-guardian" `
+            --add-data "assets;assets" `
+            --add-data "dashboard/templates;dashboard/templates" `
+            --add-data "dashboard/static;dashboard/static" `
+            --hidden-import pynput.keyboard._win32 `
+            --hidden-import pynput.mouse._win32 `
+            --hidden-import win32api `
+            --hidden-import win32con `
+            --hidden-import win32gui `
+            main.py
 
-      - name: Build exe with PyInstaller
+      - name: Get version tag
+        id: version
+        run: |
+          $date = Get-Date -Format "yyyy.MM.dd-HHmm"
+          $sha  = "${{ github.sha }}".Substring(0,7)
+          echo "tag=v$date-$sha" >> $env:GITHUB_OUTPUT
+          echo "name=PC Guardian $date (build $sha)" >> $env:GITHUB_OUTPUT
         shell: pwsh
-        run: |
-          $args = @(
-            "--onefile",
-            "--noconsole",
-            "--name", "PCGuardian",
-            "--hidden-import", "pynput.keyboard._win32",
-            "--hidden-import", "pynput.mouse._win32",
-            "--hidden-import", "win32api",
-            "--hidden-import", "win32con",
-            "--hidden-import", "win32gui",
-            "--hidden-import", "win32service",
-            "--hidden-import", "win32serviceutil",
-            "--hidden-import", "flask",
-            "--hidden-import", "telebot",
-            "--hidden-import", "cv2",
-            "--hidden-import", "pyttsx3.drivers",
-            "--hidden-import", "pyttsx3.drivers.sapi5",
-            "--hidden-import", "pygame",
-            "--collect-all", "pyttsx3",
-            "--collect-all", "cv2"
-          )
-          if (Test-Path "assets")              { $args += "--add-data"; $args += "assets;assets" }
-          if (Test-Path "dashboard/templates") { $args += "--add-data"; $args += "dashboard/templates;dashboard/templates" }
-          if (Test-Path "dashboard/static")    { $args += "--add-data"; $args += "dashboard/static;dashboard/static" }
-          if (Test-Path "assets/icon.ico")     { $args += "--icon"; $args += "assets/icon.ico" }
-          $args += "main.py"
-          & pyinstaller @args
 
-      - name: Verify and rename exe
-        shell: pwsh
-        run: |
-          if (-not (Test-Path "dist/PCGuardian.exe")) {
-            Write-Host "BUILD FAILED — exe not found"; exit 1
-          }
-          $sha = "${{ steps.sha.outputs.SHORT }}"
-          Rename-Item "dist\PCGuardian.exe" "PCGuardian-$sha-windows-x64.exe"
-          Write-Host "Built: PCGuardian-$sha-windows-x64.exe"
-
-      - name: Delete existing latest release
-        shell: bash
-        run: |
-          gh release delete latest --yes || true
-          git push origin :refs/tags/latest || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create latest release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: "PC Guardian — Latest Build"
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.name }}
           body: |
-            ## PC Guardian — Latest Build
-            Built from commit `${{ steps.sha.outputs.SHORT }}`
-
-            ### Install
-            1. Download `PCGuardian-${{ steps.sha.outputs.SHORT }}-windows-x64.exe`
-            2. Run it — config and startup register automatically on first launch
-            3. Bot connects instantly, no setup needed
-
-            ### Telegram bot
-            Open `@decdrivebot` and send `/status` to confirm it's running.
-
-            ### Commands
-            `/lock` `/unlock` `/cam` `/screen` `/speak` `/apps` `/status` `/help`
-          files: pc-guardian/dist/PCGuardian-${{ steps.sha.outputs.SHORT }}-windows-x64.exe
+            Auto-built from commit ${{ github.sha }}
+            
+            **Changes in this build:**
+            ${{ github.event.head_commit.message }}
+            
+            **How to use:**
+            1. Download `pc-guardian.exe`
+            2. Run it once — config auto-creates
+            3. Open Telegram and test with `/status`
+          files: dist/pc-guardian.exe
           draft: false
           prerelease: false
         env:
