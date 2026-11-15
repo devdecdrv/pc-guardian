@@ -33,7 +33,7 @@ def run_first_setup():
     root.resizable(False, False)
 
     # Center window
-    w, h = 520, 620
+    w, h = 520, 720
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
     root.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
