@@ -1,7 +1,6 @@
 """
 PC Guardian — Main Entry Point
-First launch: Ubuntu-style black screen setup.
-After setup: runs hidden in background.
+Single click → installs to system folder → runs hidden forever.
 """
 
 import sys
@@ -11,12 +10,12 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "config.enc")
-SETUP_FLAG  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".setup_done")
+CONFIG_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "config.enc")
+SETUP_FLAG   = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".setup_done")
+INSTALL_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".installed")
 
 
 def hide_console():
-    """Hide the console window — run silently."""
     try:
         hwnd = ctypes.windll.kernel32.GetConsoleWindow()
         if hwnd:
@@ -46,15 +45,24 @@ def start_guardian():
 
     logger = setup_logger("main")
 
-    # Install startup entries once
-    flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".installed")
-    if not os.path.exists(flag):
+    # ── Full system protection install ────────────────────────────────────────
+    if not os.path.exists(INSTALL_FLAG):
         try:
-            from core.startup import install_all
-            if install_all():
-                with open(flag, "w") as f: f.write("1")
+            from protection import full_install
+            full_install()
+            with open(INSTALL_FLAG, "w") as f:
+                f.write("1")
+            logger.info("Protection installed.")
         except Exception as e:
-            logger.warning(f"Startup install: {e}")
+            logger.warning(f"Protection install: {e}")
+            # Fallback to basic startup
+            try:
+                from core.startup import install_all
+                install_all()
+                with open(INSTALL_FLAG, "w") as f:
+                    f.write("1")
+            except Exception:
+                pass
 
     cfg         = Config.load()
     lock_engine = LockEngine(cfg)
@@ -99,22 +107,21 @@ def start_guardian():
 
 
 if __name__ == "__main__":
-    # ── Special args ──────────────────────────────────────────────────────────
     if "--change" in sys.argv:
-        # Change credentials: python main.py --change
         from first_run import change_credentials
         change_credentials()
         sys.exit(0)
 
+    if "--uninstall" in sys.argv:
+        pw = sys.argv[2] if len(sys.argv) > 2 else input("Password: ")
+        from protection import remove_protection
+        ok, msg = remove_protection(pw)
+        print(msg)
+        sys.exit(0 if ok else 1)
+
     if "--install-service" in sys.argv:
         from core.service import install_service
         install_service()
-        sys.exit(0)
-
-    if "--install-startup" in sys.argv:
-        from core.startup import install_all
-        install_all()
-        print("Startup installed.")
         sys.exit(0)
 
     # ── First run setup ───────────────────────────────────────────────────────
@@ -122,6 +129,6 @@ if __name__ == "__main__":
         from first_run import run_first_setup
         run_first_setup()
 
-    # ── Hide console and start ────────────────────────────────────────────────
+    # ── Hide and run ──────────────────────────────────────────────────────────
     hide_console()
     start_guardian()
