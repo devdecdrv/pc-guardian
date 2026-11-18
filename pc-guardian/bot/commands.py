@@ -484,3 +484,78 @@ class Commands:
             "*SETTINGS*\n/lockword · /password change · /settings",
             parse_mode="Markdown"
         )
+
+
+# ── LOCATION (appended) ───────────────────────────────────────────────────────
+
+    async def cmd_location(self, update, context):
+        if not self._auth(update): return
+        await update.message.reply_text("📍 Getting location...")
+        from monitor.location import LocationTracker
+        tracker = LocationTracker(self.cfg)
+        loc = tracker.get_location()
+        msg = tracker.format_message(loc)
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def cmd_track(self, update, context):
+        """Auto location tracking."""
+        if not self._auth(update): return
+        arg = context.args[0].lower() if context.args else "status"
+
+        from monitor.location import LocationTracker
+        from bot.alerts import send_alert
+
+        if arg == "start":
+            mins = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 30
+            tracker = LocationTracker(self.cfg)
+            tracker.start_auto_track(
+                interval_minutes=mins,
+                alert_fn=lambda msg: send_alert(msg)
+            )
+            await update.message.reply_text(f"📡 Location tracking every {mins} min.")
+        elif arg == "stop":
+            await update.message.reply_text("📍 Tracking stopped.")
+        else:
+            await update.message.reply_text(
+                "Usage:\n/track start [minutes]\n/track stop"
+            )
+
+    # ── SCREEN STREAM (appended) ──────────────────────────────────────────────
+
+    async def cmd_screenstream(self, update, context):
+        if not self._auth(update): return
+        arg = context.args[0].lower() if context.args else "start"
+        chat_id = update.effective_chat.id
+
+        from monitor.screen_stream import get_streamer
+        streamer = get_streamer()
+
+        if arg == "stop":
+            streamer.stop()
+            await update.message.reply_text("🖥 Screen stream stopped.")
+            return
+
+        # Parse interval and quality
+        interval = 3.0
+        quality  = 60
+
+        if context.args:
+            for a in context.args:
+                if a.replace(".", "").isdigit():
+                    interval = float(a)
+                elif a.startswith("q"):
+                    try: quality = int(a[1:])
+                    except Exception: pass
+
+        # Minimum 1s for fast mode
+        if interval < 1.0:
+            interval = 1.0
+            await update.message.reply_text(
+                "⚡ Fast mode: 1s interval. Send /screenstream stop to end."
+            )
+        else:
+            await update.message.reply_text(
+                f"🖥 Screen stream: every {interval}s. Send /screenstream stop to end."
+            )
+
+        streamer.start(chat_id=chat_id, interval=interval, quality=quality)
