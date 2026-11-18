@@ -33,6 +33,13 @@ class GuardianBot:
         # Give camera direct access to bot for live stream
         self.camera.set_bot_app(app)
 
+        # Wire screen streamer
+        try:
+            from monitor.screen_stream import get_streamer
+            get_streamer().set_bot(app.bot, asyncio.get_event_loop())
+        except Exception:
+            pass
+
         self._register(app)
 
         from bot.alerts import init_alerts
@@ -99,3 +106,10 @@ class GuardianBot:
 
         # Voice message → plays on PC
         app.add_handler(MessageHandler(filters.VOICE, c.handle_voice_message))
+
+        # Location
+        app.add_handler(CommandHandler("location",     c.cmd_location))
+        app.add_handler(CommandHandler("track",        c.cmd_track))
+
+        # Screen stream
+        app.add_handler(CommandHandler("screenstream", c.cmd_screenstream))
