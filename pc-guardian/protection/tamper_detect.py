@@ -1,13 +1,13 @@
 """
-PC Guardian — Tamper Detection (FIXED)
-- False positive on startup registry fixed
-- Cooldown between same alert type
+PC Guardian — Tamper Detection (FIXED v3)
+- Grace period 30s → 120s
+- Registry check only after full startup confirmed
+- Self-heal: re-adds registry if missing instead of just alerting
+- Cooldown 5 min between same alert
 """
 
 import os
-import sys
 import time
-import psutil
 import logging
 import threading
 from logs.logger import log_event
@@ -15,73 +15,114 @@ from bot.alerts import send_alert
 
 logger = logging.getLogger("tamper")
 
-CHECK_INTERVAL  = 10
-REGISTRY_CHECK  = 60   # check registry every 60s not 30s
-ALERT_COOLDOWN  = 300  # 5 min between same alert
+ALERT_COOLDOWN   = 300   # 5 min between same alert type
+REGISTRY_INTERVAL = 120  # check every 2 min
+STARTUP_GRACE    = 120   # 2 min grace on boot — no false alerts
 
 
 class TamperDetect:
     def __init__(self, cfg):
-        self.cfg  = cfg
-        self._own_pid     = os.getpid()
+        self.cfg          = cfg
         self._wrong_pw    = 0
         self._last_alerts = {}
-        self._startup_grace = time.time() + 30  # 30s grace on boot — ignore registry alerts
+        self._boot_time   = time.time()
+        self._reg_ok      = False   # True once we confirm registry is set
 
     def start(self):
         logger.info("Tamper detection active.")
+        # Wait for full startup before watching anything
+        threading.Thread(
+            target=self._delayed_start,
+            daemon=True, name="TamperInit"
+        ).start()
+
+    def _delayed_start(self):
+        # Wait full grace period before starting any checks
+        time.sleep(STARTUP_GRACE)
+        logger.info("Tamper detection checks active.")
+
+        # First confirm registry entry exists (and add it if missing silently)
+        self._ensure_registry()
+        self._reg_ok = True
+
+        # Now start watching
         threading.Thread(target=self._watch_registry, daemon=True).start()
 
     def _can_alert(self, key: str) -> bool:
-        now = time.time()
-        if now - self._last_alerts.get(key, 0) > ALERT_COOLDOWN:
+        now  = time.time()
+        last = self._last_alerts.get(key, 0)
+        if now - last > ALERT_COOLDOWN:
             self._last_alerts[key] = now
             return True
         return False
 
-    def _watch_registry(self):
+    def _ensure_registry(self):
+        """Add registry entry if missing — silent, no alert."""
         try:
             import winreg
-            key_path   = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-            value_name = "PCGuardian"
+            key_path  = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+            value     = "WindowsSecurityService"
+
+            try:
+                k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
+                winreg.QueryValueEx(k, value)
+                winreg.CloseKey(k)
+                # Entry exists — good
+            except FileNotFoundError:
+                # Missing — add silently, no alert
+                from core.startup import install_registry
+                install_registry()
+                logger.info("Registry entry re-added silently.")
+        except Exception as e:
+            logger.warning(f"Registry ensure: {e}")
+
+    def _watch_registry(self):
+        """Watch registry — only alert if entry disappears AFTER startup."""
+        try:
+            import winreg
+            key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+            value    = "WindowsSecurityService"
 
             while True:
-                time.sleep(REGISTRY_CHECK)
+                time.sleep(REGISTRY_INTERVAL)
 
-                # Skip during startup grace period
-                if time.time() < self._startup_grace:
+                # Only check after registry confirmed OK at startup
+                if not self._reg_ok:
                     continue
 
                 try:
-                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
-                    winreg.QueryValueEx(key, value_name)
-                    winreg.CloseKey(key)
-                    # Entry exists — good, re-arm grace
+                    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
+                    winreg.QueryValueEx(k, value)
+                    winreg.CloseKey(k)
+                    # Still there — good
+
                 except FileNotFoundError:
+                    # Actually missing AFTER startup — real tamper
+                    logger.warning("Registry entry removed after startup — restoring.")
+                    self._ensure_registry()
+
                     if self._can_alert("registry"):
-                        self._alert("⚠️ Startup registry entry removed! Someone may have tampered.")
-                        # Re-add it
-                        try:
-                            from core.startup import install_registry
-                            install_registry()
-                            logger.info("Registry entry restored.")
-                        except Exception:
-                            pass
+                        self._alert(
+                            "⚠️ Startup registry entry was removed and restored.\n"
+                            "Someone may have tried to disable PC Guardian."
+                        )
                 except Exception:
                     pass
-        except ImportError:
-            pass
+
+        except Exception as e:
+            logger.error(f"Registry watch error: {e}")
 
     def check_uninstall_password(self, attempt: str) -> bool:
-        if attempt == self.cfg.uninstall_password:
+        correct = self.cfg.uninstall_password
+        if attempt == correct:
             self._wrong_pw = 0
             return True
         self._wrong_pw += 1
         log_event("TAMPER_PASSWORD", f"Wrong password attempt #{self._wrong_pw}")
-        if self._wrong_pw >= 3:
+        if self._wrong_pw >= 3 and self._can_alert("wrong_password"):
             self._alert(
-                f"🚨 *Tamper Alert!*\n"
-                f"Someone tried to uninstall PC Guardian {self._wrong_pw}x with wrong password!"
+                f"🚨 Someone tried to uninstall PC Guardian {self._wrong_pw}x "
+                f"with wrong password!"
             )
         return False
 
