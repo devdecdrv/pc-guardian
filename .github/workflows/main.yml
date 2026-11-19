@@ -25,33 +25,41 @@ jobs:
       - name: Find tools and build driver
         shell: pwsh
         run: |
-          # Find cl.exe
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath  = & $vswhere -latest -products * -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath
-          Write-Host "VS Path: $vsPath"
-
-          # Find cl.exe and link.exe
-          $clPath   = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "cl.exe"   | Where-Object { $_.FullName -like "*x64\cl.exe"   } | Select-Object -First 1 -ExpandProperty FullName
-          $linkPath = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "link.exe" | Where-Object { $_.FullName -like "*x64\link.exe" } | Select-Object -First 1 -ExpandProperty FullName
-
+          # Find cl.exe via vswhere
+          $vswhere  = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath   = & $vswhere -latest -products * -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath
+          $clPath   = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "cl.exe"   | Where-Object { $_.FullName -like "*HostX64\x64\cl.exe"   } | Select-Object -First 1 -ExpandProperty FullName
+          $linkPath = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "link.exe" | Where-Object { $_.FullName -like "*HostX64\x64\link.exe" } | Select-Object -First 1 -ExpandProperty FullName
           Write-Host "cl.exe:   $clPath"
           Write-Host "link.exe: $linkPath"
 
-          # Find WDK version
-          $kits = "C:\Program Files (x86)\Windows Kits\10\Include"
-          $ver  = Get-ChildItem $kits | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty Name
-          Write-Host "WDK version: $ver"
+          # Find correct WDK version — must have ntddk.h inside km folder
+          $kitsBase = "C:\Program Files (x86)\Windows Kits\10\Include"
+          $ver = Get-ChildItem $kitsBase |
+                 Where-Object { $_.PSIsContainer -and (Test-Path "$($_.FullName)\km\ntddk.h") } |
+                 Sort-Object Name -Descending |
+                 Select-Object -First 1 -ExpandProperty Name
+
+          if (-not $ver) {
+            Write-Error "No WDK version found with ntddk.h"
+            Get-ChildItem $kitsBase | ForEach-Object { Write-Host "Found: $($_.Name)" }
+            exit 1
+          }
+          Write-Host "WDK version with ntddk.h: $ver"
 
           $inc = "C:\Program Files (x86)\Windows Kits\10\Include\$ver"
           $lib = "C:\Program Files (x86)\Windows Kits\10\Lib\$ver"
 
-          # Create build dir and copy sources
+          # Verify ntddk.h exists
+          Write-Host "ntddk.h exists: $(Test-Path "$inc\km\ntddk.h")"
+          Write-Host "ntoskrnl.lib exists: $(Test-Path "$lib\km\x64\ntoskrnl.lib")"
+
+          # Build
           New-Item -ItemType Directory -Force -Path build_drv | Out-Null
           Copy-Item pc-guardian\driver\PCGuard.cpp build_drv\
           Copy-Item pc-guardian\driver\PCGuard.h   build_drv\
           Set-Location build_drv
 
-          # Compile
           & "$clPath" /nologo /kernel /GS- /W3 /WX- /Gz /GF /EHsc /Zp8 /GR- `
             /D_AMD64_ /DNTDDI_VERSION=0x0A000007 /D_WIN32_WINNT=0x0A00 /DWIN32=100 /DDBG `
             "/I$inc\km" "/I$inc\shared" `
@@ -59,7 +67,6 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) { Write-Error "Compile failed"; exit 1 }
 
-          # Link
           & "$linkPath" /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB `
             /MACHINE:X64 `
             "/LIBPATH:$lib\km\x64" `
@@ -69,9 +76,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "Link failed"; exit 1 }
 
           if (Test-Path PCGuard.sys) {
-            Write-Host "PCGuard.sys built OK — $($(Get-Item PCGuard.sys).Length) bytes"
+            Write-Host "PCGuard.sys built: $($(Get-Item PCGuard.sys).Length) bytes"
           } else {
-            Write-Error "PCGuard.sys missing after link"
+            Write-Error "PCGuard.sys missing"
             exit 1
           }
 
@@ -83,7 +90,7 @@ jobs:
             Copy-Item build_drv\PCGuard.sys pc-guardian\assets\PCGuard.sys
             Write-Host "Driver copied."
           } else {
-            Write-Host "No driver built."
+            Write-Host "No driver."
           }
 
       - name: Setup Python
@@ -127,7 +134,7 @@ jobs:
           if (Test-Path "pc-guardian\assets\PCGuard.sys") {
             $args += "--add-data"
             $args += "pc-guardian/assets/PCGuard.sys;assets"
-            Write-Host "Driver will be bundled."
+            Write-Host "Bundling driver."
           }
           $args += "pc-guardian/main.py"
           & pyinstaller @args
@@ -139,7 +146,7 @@ jobs:
         run: |
           $date = Get-Date -Format "yyyy.MM.dd-HHmm"
           $sha  = "${{ github.sha }}".Substring(0,7)
-          "tag=v$date-$sha"  >> $env:GITHUB_OUTPUT
+          "tag=v$date-$sha" >> $env:GITHUB_OUTPUT
           "name=Windows Security $date build $sha" >> $env:GITHUB_OUTPUT
 
       - name: Create Release
