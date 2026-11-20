@@ -13,78 +13,98 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install WDK
+      - name: Install WDK (full download)
         shell: pwsh
         run: |
+          # Download WDK installer
           $url = "https://go.microsoft.com/fwlink/?linkid=2249371"
           $out = "$env:TEMP\wdksetup.exe"
+          Write-Host "Downloading WDK..."
           Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-          Start-Process -FilePath $out -ArgumentList "/quiet /norestart /features OptionId.WindowsDriverKitComplete" -Wait
-          Write-Host "WDK installed."
+
+          # Install with all features, no quiet (so it doesn't skip)
+          Write-Host "Installing WDK (full)..."
+          $p = Start-Process -FilePath $out -ArgumentList "/features + /quiet /norestart" -Wait -PassThru
+          Write-Host "Exit code: $($p.ExitCode)"
+
+          # Verify
+          $check = "C:\Program Files (x86)\Windows Kits\10\Include"
+          if (Test-Path $check) {
+            Get-ChildItem $check | ForEach-Object {
+              $hasKm = Test-Path "$($_.FullName)\km\ntddk.h"
+              Write-Host "$($_.Name) — ntddk.h: $hasKm"
+            }
+          } else {
+            Write-Host "Kits\10\Include not found after install"
+          }
 
       - name: Build PCGuard.sys
         shell: pwsh
         run: |
+          # Find cl.exe
           $vswhere  = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath   = & $vswhere -latest -products * -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath
           $msvcVer  = Get-ChildItem "$vsPath\VC\Tools\MSVC" | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty Name
           $msvcBase = "$vsPath\VC\Tools\MSVC\$msvcVer"
           $clPath   = "$msvcBase\bin\HostX64\x64\cl.exe"
           $linkPath = "$msvcBase\bin\HostX64\x64\link.exe"
-
-          $wdkVer  = "10.0.22621.0"
-          $wdkBase = "C:\Program Files (x86)\Windows Kits\10"
-          $wdkInc  = "$wdkBase\Include\$wdkVer"
-          $wdkLib  = "$wdkBase\Lib\$wdkVer"
-
           Write-Host "cl.exe: $clPath"
-          Write-Host "WDK Inc: $wdkInc"
 
-          # List all include folders for debug
-          Get-ChildItem $wdkInc | ForEach-Object { Write-Host "  INC folder: $($_.Name)" }
+          # Find WDK — try all versions for ntddk.h
+          $kitsInc = "C:\Program Files (x86)\Windows Kits\10\Include"
+          $wdkVer  = $null
+          if (Test-Path $kitsInc) {
+            foreach ($d in (Get-ChildItem $kitsInc | Sort-Object Name -Descending)) {
+              $nt = "$($d.FullName)\km\ntddk.h"
+              Write-Host "Checking $($d.Name)\km\ntddk.h : $(Test-Path $nt)"
+              if (Test-Path $nt) { $wdkVer = $d.Name; break }
+            }
+          }
+
+          if (-not $wdkVer) {
+            Write-Host "ntddk.h not found — trying SDK headers directly"
+            # GitHub Actions has SDK — use it as fallback
+            $sdkInc = "C:\Program Files (x86)\Windows Kits\10\Include"
+            Get-ChildItem $sdkInc -Recurse -Filter "ntddk.h" -ErrorAction SilentlyContinue |
+              Select-Object -First 5 | ForEach-Object { Write-Host "Found ntddk.h at: $($_.FullName)" }
+            exit 1
+          }
+
+          Write-Host "Using WDK: $wdkVer"
+          $wdkInc = "C:\Program Files (x86)\Windows Kits\10\Include\$wdkVer"
+          $wdkLib = "C:\Program Files (x86)\Windows Kits\10\Lib\$wdkVer"
 
           New-Item -ItemType Directory -Force -Path build_drv | Out-Null
           Copy-Item pc-guardian\driver\PCGuard.cpp build_drv\
           Copy-Item pc-guardian\driver\PCGuard.h   build_drv\
           Set-Location build_drv
 
-          # All required include paths for kernel driver
           $includes = @(
             "/I`"$wdkInc\km`"",
             "/I`"$wdkInc\shared`"",
-            "/I`"$wdkInc\ucrt`"",
             "/I`"$msvcBase\include`""
           )
+          # Add ucrt if exists
+          if (Test-Path "$wdkInc\ucrt") { $includes += "/I`"$wdkInc\ucrt`"" }
 
           $clArgs = @(
             "/nologo", "/kernel", "/GS-", "/W3", "/WX-", "/Gz",
             "/GF", "/EHsc", "/Zp8", "/GR-", "/Zl",
             "/D_AMD64_", "/DNTDDI_VERSION=0x0A000007",
-            "/D_WIN32_WINNT=0x0A00", "/DWIN32=100", "/DDBG",
-            "/DKERNELMODE=1"
+            "/D_WIN32_WINNT=0x0A00", "/DWIN32=100", "/DDBG"
           ) + $includes + @("/c", "PCGuard.cpp")
 
-          Write-Host "Compiling..."
           & "$clPath" @clArgs
-          if ($LASTEXITCODE -ne 0) { Write-Error "Compile failed"; exit 1 }
-
-          $libPath = "$wdkLib\km\x64"
-          Write-Host "Linking from: $libPath"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
           & "$linkPath" `
             /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB `
-            /MACHINE:X64 `
-            "/LIBPATH:$libPath" `
+            /MACHINE:X64 "/LIBPATH:$wdkLib\km\x64" `
             ntoskrnl.lib hal.lib wdm.lib wdmsec.lib `
             /OUT:PCGuard.sys PCGuard.obj
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
-          if ($LASTEXITCODE -ne 0) { Write-Error "Link failed"; exit 1 }
-
-          if (Test-Path PCGuard.sys) {
-            Write-Host "SUCCESS: PCGuard.sys $($(Get-Item PCGuard.sys).Length) bytes"
-          } else {
-            Write-Error "PCGuard.sys missing"; exit 1
-          }
+          Write-Host "PCGuard.sys built: $($(Get-Item PCGuard.sys).Length) bytes"
 
       - name: Copy driver to assets
         shell: pwsh
@@ -92,9 +112,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path pc-guardian\assets | Out-Null
           if (Test-Path build_drv\PCGuard.sys) {
             Copy-Item build_drv\PCGuard.sys pc-guardian\assets\PCGuard.sys
-            Write-Host "Driver copied to assets."
-          } else {
-            Write-Host "No driver to copy."
+            Write-Host "Driver copied."
           }
 
       - name: Setup Python
@@ -115,7 +133,7 @@ jobs:
       - name: Build EXE
         shell: pwsh
         run: |
-          $pyArgs = @(
+          $a = @(
             "--onefile", "--noconsole", "--clean",
             "--name", "Windows Security",
             "--icon", "pc-guardian/assets/app.ico",
@@ -136,12 +154,10 @@ jobs:
             "--paths", "pc-guardian"
           )
           if (Test-Path "pc-guardian\assets\PCGuard.sys") {
-            $pyArgs += "--add-data"
-            $pyArgs += "pc-guardian/assets/PCGuard.sys;assets"
-            Write-Host "Bundling kernel driver with EXE."
+            $a += "--add-data"; $a += "pc-guardian/assets/PCGuard.sys;assets"
           }
-          $pyArgs += "pc-guardian/main.py"
-          & pyinstaller @pyArgs
+          $a += "pc-guardian/main.py"
+          & pyinstaller @a
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Get version
