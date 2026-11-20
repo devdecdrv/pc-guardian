@@ -1,33 +1,32 @@
 """
-PC Guardian — First Run Setup
-Credentials hardcoded below — change and push to build new exe.
+PC Guardian — First Run
+Credentials hardcoded here. No popup, no input needed.
+Change values below → push → new exe builds automatically.
 """
 
 import os
 import sys
 import subprocess
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "config.enc")
-SETUP_FLAG  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".setup_done")
-
-# ══════════════════════════════════════════════════════════════
-#   PUT YOUR CREDENTIALS HERE
-#   Change these values, push to GitHub, download new .exe
-# ══════════════════════════════════════════════════════════════
-
-BOT_TOKEN         = "9210089363:AAEIbLdw_XzM7cibtONb3FhqKjnNWE3798s"
-TELEGRAM_USER_ID  = "7505093216"         # your numeric Telegram ID
-CHILD_NAME        = "Son"
-LOCK_KEYWORD      = "lockson"
+# ══════════════════════════════════════════════
+#   CHANGE YOUR CREDENTIALS HERE
+# ══════════════════════════════════════════════
+BOT_TOKEN          = "8901039134:AAEBI8Wn-HKC1b3IG9qzz4hIwKnKv_UyIcA"
+TELEGRAM_USER_ID   = 8889476230
+CHILD_NAME         = "Son"
+LOCK_KEYWORD       = "lockson"
 UNINSTALL_PASSWORD = "decdrv"
-BEDTIME_ENABLED   = False
-BEDTIME_LOCK_TIME = "21:00"
-BEDTIME_UNLOCK_TIME = "16:00"
+BEDTIME_ENABLED    = False
+BEDTIME_LOCK       = "21:00"
+BEDTIME_UNLOCK     = "16:00"
+# ══════════════════════════════════════════════
 
-# ══════════════════════════════════════════════════════════════
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+CONFIG_DIR  = os.path.join(BASE_DIR, "config")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.enc")
+SETUP_FLAG  = os.path.join(BASE_DIR, ".setup_done")
 
 
 def needs_setup() -> bool:
@@ -35,10 +34,7 @@ def needs_setup() -> bool:
 
 
 def run_first_setup():
-    os.makedirs(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config"),
-        exist_ok=True
-    )
+    os.makedirs(CONFIG_DIR, exist_ok=True)
 
     from config.crypto import encrypt_config
     encrypt_config({
@@ -51,9 +47,9 @@ def run_first_setup():
         "daily_report_time":  "21:00",
         "school_schedule":    {"enabled": False, "lock_time": "08:00", "unlock_time": "15:00"},
         "bedtime_schedule":   {
-            "enabled":      BEDTIME_ENABLED,
-            "lock_time":    BEDTIME_LOCK_TIME,
-            "unlock_time":  BEDTIME_UNLOCK_TIME
+            "enabled":     BEDTIME_ENABLED,
+            "lock_time":   BEDTIME_LOCK,
+            "unlock_time": BEDTIME_UNLOCK,
         },
         "panic_detection":    {"voice_enabled": True, "behavior_enabled": True, "volume_threshold": 0.7},
         "web_dashboard":      {"enabled": True, "port": 8080, "password": UNINSTALL_PASSWORD},
@@ -66,14 +62,13 @@ def run_first_setup():
     with open(SETUP_FLAG, "w") as f:
         f.write("1")
 
-    protect_from_deletion()
+    _protect_config()
 
 
-def protect_from_deletion():
+def _protect_config():
     try:
-        config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
         subprocess.run(
-            f'icacls "{config_dir}" /deny Everyone:(D,DC)',
+            f'icacls "{CONFIG_DIR}" /deny Everyone:(D,DC)',
             shell=True, capture_output=True
         )
     except Exception:
@@ -81,5 +76,5 @@ def protect_from_deletion():
 
 
 if __name__ == "__main__":
-    if needs_setup():
-        run_first_setup()
+    run_first_setup()
+    print("Config created.")
