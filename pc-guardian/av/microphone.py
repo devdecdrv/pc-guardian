@@ -1,8 +1,6 @@
 """
-PC Guardian — Microphone (FIXED)
-- stop_stream actually works now via threading Event
-- Panic listener reliable
-- Live stream chunks sent properly
+PC Guardian — Microphone (FIXED v4)
+threading.Event used everywhere — stop actually works.
 """
 
 import os
@@ -23,26 +21,27 @@ CHANNELS    = 1
 
 class MicrophoneSystem:
     def __init__(self, cfg, lock_engine=None):
-        self.cfg          = cfg
-        self.lock_engine  = lock_engine
-        self._panic_cb    = None
+        self.cfg         = cfg
+        self.lock_engine = lock_engine
+        self._panic_cb   = None
 
-        # Proper stop events — this is what was missing
-        self._stream_stop  = threading.Event()
-        self._panic_stop   = threading.Event()
+        # Events for reliable stopping
+        self._stream_stop = threading.Event()
+        self._panic_stop  = threading.Event()
+        self._stream_stop.set()   # not streaming initially
+        self._panic_stop.clear()  # panic listener runs
 
-        # Start panic listener
         if cfg.panic_detection.get("voice_enabled", True):
-            self._start_panic_listener()
-
-    # ── PUBLIC ────────────────────────────────────────────────────────────────
+            threading.Thread(
+                target=self._panic_loop,
+                daemon=True,
+                name="PanicMic"
+            ).start()
 
     def record_clip(self, seconds: int = 15) -> str:
-        """Record N seconds. Returns wav path."""
         try:
             import sounddevice as sd
             import scipy.io.wavfile as wav
-
             path  = os.path.join(AUDIO_DIR, f"clip_{int(time.time())}.wav")
             audio = sd.rec(
                 int(seconds * SAMPLE_RATE),
@@ -58,8 +57,11 @@ class MicrophoneSystem:
             return None
 
     def start_live_stream(self, callback, chunk_seconds: float = 3.0):
-        """Stream mic in chunks to callback(path). Properly stoppable."""
-        self._stream_stop.clear()
+        # Stop any existing stream first
+        self.stop_stream()
+        time.sleep(0.3)
+
+        self._stream_stop.clear()   # clear = running
 
         def _run():
             try:
@@ -67,6 +69,7 @@ class MicrophoneSystem:
                 import scipy.io.wavfile as wav
 
                 while not self._stream_stop.is_set():
+                    # Record chunk
                     audio = sd.rec(
                         int(chunk_seconds * SAMPLE_RATE),
                         samplerate=SAMPLE_RATE,
@@ -90,25 +93,13 @@ class MicrophoneSystem:
         logger.info("Mic live stream started.")
 
     def stop_stream(self):
-        """Stop live stream — actually works now."""
+        """Actually stops the stream — sets event and waits."""
         self._stream_stop.set()
-        logger.info("Mic stream stop signal sent.")
+        time.sleep(0.1)
+        logger.info("Mic stream stopped.")
 
     def set_panic_callback(self, fn):
-        """fn(clip_path, reason) called on panic detection."""
         self._panic_cb = fn
-
-    # ── PANIC LISTENER ────────────────────────────────────────────────────────
-
-    def _start_panic_listener(self):
-        self._panic_stop.clear()
-        t = threading.Thread(
-            target=self._panic_loop,
-            daemon=True,
-            name="PanicMic"
-        )
-        t.start()
-        logger.info("Panic mic listener started.")
 
     def stop_panic_listener(self):
         self._panic_stop.set()
@@ -118,15 +109,13 @@ class MicrophoneSystem:
             import sounddevice as sd
 
             threshold  = self.cfg.panic_detection.get("volume_threshold", 0.7)
-            clip_secs  = 10
-            check_secs = 1.0
             cooldown   = 30
             last_alert = 0
 
             while not self._panic_stop.is_set():
                 try:
                     audio = sd.rec(
-                        int(check_secs * SAMPLE_RATE),
+                        int(1.0 * SAMPLE_RATE),
                         samplerate=SAMPLE_RATE,
                         channels=CHANNELS,
                         dtype="float32"
@@ -136,15 +125,15 @@ class MicrophoneSystem:
                     if self._panic_stop.is_set():
                         break
 
-                    volume     = float(np.abs(audio).mean())
-                    normalized = min(volume * 100, 1.0)
+                    vol = float(np.abs(audio).mean())
+                    normalized = min(vol * 100, 1.0)
 
                     if normalized > threshold:
                         now = time.time()
                         if now - last_alert > cooldown:
                             last_alert = now
                             logger.warning(f"Raised voice! vol={normalized:.2f}")
-                            clip = self.record_clip(clip_secs)
+                            clip = self.record_clip(10)
                             if self._panic_cb and clip:
                                 self._panic_cb(clip, "raised_voice")
 
@@ -152,4 +141,4 @@ class MicrophoneSystem:
                     time.sleep(1)
 
         except Exception as e:
-            logger.error(f"Panic loop failed: {e}")
+            logger.error(f"Panic loop: {e}")
